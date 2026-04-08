@@ -1,0 +1,12 @@
+name: graphclust-ci
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - viennarna
+  - locarna
+  - infernal
+  - rnaz
+  - perl-math-round
+  - perl-thread-queue
