@@ -272,8 +272,8 @@ public:
 } PARAM_OBJ;
 
 
-typedef std::tr1::unordered_map<unsigned, int> umap_uint_int;
-typedef std::tr1::unordered_map<unsigned, vector<unsigned> > umap_uint_vec_uint;
+typedef graphclust_compat::unordered_map<unsigned, int> umap_uint_int;
+typedef graphclust_compat::unordered_map<unsigned, vector<unsigned> > umap_uint_vec_uint;
 
 bool mySort (pair<double, unsigned> i, pair<double, unsigned> j) { return (i.first < j.first); }
 bool mySortSecond (pair<unsigned, int> i, pair<unsigned, int> j) { return (i.second < j.second); }

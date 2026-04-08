@@ -9,8 +9,17 @@
 #include <stdexcept>
 #include <map>
 #include <set>
-//#include <unordered_map> // need compiler option -std=c++0x
+#if __cplusplus >= 201103L
+#include <unordered_map>
+namespace graphclust_compat {
+using std::unordered_map;
+}
+#else
 #include <tr1/unordered_map>
+namespace graphclust_compat {
+using std::tr1::unordered_map;
+}
+#endif
 #include <queue>
 #include <cmath>
 #include <algorithm>
