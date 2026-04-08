@@ -9,4 +9,3 @@ dependencies:
   - infernal
   - rnaz
   - perl-math-round
-  - perl-thread-queue
