@@ -32,6 +32,28 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libomp
 
+      # RNAshapes 2.x is not packaged in bioconda for modern platforms.
+      # A stub satisfies the configure path-check; actual shape computations
+      # are not exercised by the CI smoke test.
+      - name: Create RNAshapes stub
+        shell: bash -el {0}
+        run: |
+          STUB="$CONDA_PREFIX/bin/RNAshapes"
+          echo '#!/bin/sh' > "$STUB"
+          chmod +x "$STUB"
+
+      # The bundled config.sub is from 2013 and does not recognise modern
+      # Apple Silicon (arm64-apple-darwin24) or recent x86_64 Linux triples.
+      # Download the current version from the GNU config project.
+      - name: Update config.sub / config.guess
+        run: |
+          curl -fsSL \
+            "https://git.savannah.gnu.org/cgit/config.git/plain/config.sub" \
+            -o config.sub
+          curl -fsSL \
+            "https://git.savannah.gnu.org/cgit/config.git/plain/config.guess" \
+            -o config.guess
+
       - name: Configure (Linux)
         if: runner.os == 'Linux'
         shell: bash -el {0}
