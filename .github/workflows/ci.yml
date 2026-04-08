@@ -93,3 +93,45 @@ jobs:
             "$GITHUB_WORKSPACE/dist/bin/MASTER_GraphClust.pl" \
             && echo "OK: --threads flag present" \
             || { echo "FAIL: --threads flag missing"; exit 1; }
+
+      # Full pipeline integration test.
+      # Runs the complete 9-stage pipeline on 10 synthetic sequences (2 groups
+      # of 5 near-identical sequences that should cluster together).
+      # Uses only tools available in the conda environment:
+      #   no blastclust (input_blastclust=0), no CMfinder (center_model_type=3).
+      - name: Pipeline integration test
+        shell: bash -el {0}
+        run: |
+          export PATH="$GITHUB_WORKSPACE/dist/bin:$PATH"
+          WORK=$(mktemp -d /tmp/gc_ci_test.XXXXXX)
+          trap 'rm -rf "$WORK"' EXIT
+
+          echo "=== Running GraphClust pipeline on ci/test.fasta ==="
+          MASTER_GraphClust.pl \
+            --root   "$WORK" \
+            --fasta  "$GITHUB_WORKSPACE/ci/test.fasta" \
+            --config "$GITHUB_WORKSPACE/ci/test.config" \
+            --threads 2
+
+          echo "=== Checking pipeline output ==="
+          # Stage 2 done: GSPAN graphs were built
+          [[ -f "$WORK/GSPAN/gspan.DONE" ]] \
+            && echo "OK: Stage 2 (GSPAN) completed" \
+            || { echo "FAIL: GSPAN stage did not finish"; ls "$WORK/" 2>/dev/null; exit 1; }
+
+          # Stage 3 done: NSPDK feature vectors were computed
+          [[ -f "$WORK/SVECTOR/svector.groups.DONE" ]] \
+            && echo "OK: Stage 3 (NSPDK vectors) completed" \
+            || { echo "FAIL: NSPDK vector stage did not finish"; exit 1; }
+
+          # Stage 5 done: density clustering produced at least one cluster
+          [[ -f "$WORK/SVECTOR/data.svector.fast_cluster.1.DONE" ]] \
+            && echo "OK: Stage 5 (NSPDK clustering) completed" \
+            || { echo "FAIL: NSPDK clustering did not finish"; exit 1; }
+
+          # Final results directory exists
+          [[ -d "$WORK/RESULTS" ]] \
+            && echo "OK: RESULTS directory present" \
+            || { echo "FAIL: RESULTS directory missing"; exit 1; }
+
+          echo "=== Pipeline integration test passed ==="
