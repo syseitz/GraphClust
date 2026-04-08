@@ -27,24 +27,14 @@ jobs:
           environment-file: ci/environment.yml
           activate-environment: graphclust-ci
 
-      # Apple clang ships without OpenMP runtime; install it via Homebrew
-      - name: Install libomp (macOS only)
+      # LLVM from Homebrew provides a clang++ that supports -fopenmp natively.
+      # Apple's system clang++ does not support -fopenmp.
+      - name: Install LLVM (macOS only)
         if: runner.os == 'macOS'
-        run: brew install libomp
-
-      # RNAshapes 2.x is not packaged in bioconda for modern platforms.
-      # A stub satisfies the configure path-check; actual shape computations
-      # are not exercised by the CI smoke test.
-      - name: Create RNAshapes stub
-        shell: bash -el {0}
-        run: |
-          STUB="$CONDA_PREFIX/bin/RNAshapes"
-          echo '#!/bin/sh' > "$STUB"
-          chmod +x "$STUB"
+        run: brew install llvm
 
       # The bundled config.sub is from 2013 and does not recognise modern
-      # Apple Silicon (arm64-apple-darwin24) or recent x86_64 Linux triples.
-      # Download the current version from the GNU config project.
+      # Apple Silicon (arm64-apple-darwin24) or recent Linux triples.
       - name: Update config.sub / config.guess
         run: |
           curl -fsSL \
@@ -66,13 +56,14 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash -el {0}
         run: |
-          OMP_PREFIX="$(brew --prefix libomp)"
+          LLVM_PREFIX="$(brew --prefix llvm)"
           ./configure \
             --prefix="$GITHUB_WORKSPACE/install" \
             --with-vrna="$CONDA_PREFIX" \
-            CXXFLAGS="-O3 -Xpreprocessor -fopenmp -I${OMP_PREFIX}/include" \
-            CFLAGS="-O3" \
-            LDFLAGS="-L${OMP_PREFIX}/lib -lomp"
+            CC="${LLVM_PREFIX}/bin/clang" \
+            CXX="${LLVM_PREFIX}/bin/clang++" \
+            CXXFLAGS="-O3" \
+            CFLAGS="-O3"
 
       - name: Build
         shell: bash -el {0}
@@ -91,10 +82,13 @@ jobs:
           perl -c gc_cmsearch.pl
           perl -c fasta2shrep_gspan.pl
 
+      # Verify the --threads patch landed in the installed script.
+      # We grep the source rather than --help because pod2usage -verbose 1
+      # only prints the SYNOPSIS section (which does not list individual flags).
       - name: Smoke test – --threads flag
         shell: bash -el {0}
         run: |
-          "$GITHUB_WORKSPACE/install/bin/MASTER_GraphClust.pl" --help 2>&1 \
-            | grep -qi "thread" \
+          grep -q '"threads=i"' \
+            "$GITHUB_WORKSPACE/install/bin/MASTER_GraphClust.pl" \
             && echo "OK: --threads flag present" \
             || { echo "FAIL: --threads flag missing"; exit 1; }

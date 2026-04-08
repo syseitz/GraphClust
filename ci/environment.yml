@@ -8,4 +8,5 @@ dependencies:
   - locarna
   - infernal
   - rnaz
+  - rnashapes
   - perl-math-round
