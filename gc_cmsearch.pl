@@ -23,6 +23,7 @@ my $evaluate;
 my $use_cmcalibrate;
 my $in_root_dir;
 my $verbose;
+my $cpu_threads = 1;
 
 
 ## infernal 1.1
@@ -31,8 +32,25 @@ my $verbose;
 # my $OPTS_cmbuild = "";
 # my $OPTS_cmcalibrate = " -L 0.01 --cpu 1 ";
 
-## infernal 1.0.2
-my $OPTS_cmsearch = " -g --fil-no-hmm --noalign ";
+## infernal 1.0.2 / 1.1 compatibility
+my $cmsearch_help = `cmsearch -h 2>&1`;
+if ( $CONFIG{PATH_INFERNAL} && $CONFIG{PATH_INFERNAL} ne "false" ) {
+  $cmsearch_help = `$CONFIG{PATH_INFERNAL}/cmsearch -h 2>&1`;
+}
+my $cmcalibrate_help = `cmcalibrate -h 2>&1`;
+if ( $CONFIG{PATH_INFERNAL} && $CONFIG{PATH_INFERNAL} ne "false" ) {
+  $cmcalibrate_help = `$CONFIG{PATH_INFERNAL}/cmcalibrate -h 2>&1`;
+}
+my $cmsearch_filter_opt = "--fil-no-hmm";
+$cmsearch_filter_opt = "--nohmm" if ( $cmsearch_help !~ /--fil-no-hmm/ && $cmsearch_help =~ /--nohmm/ );
+my $cmsearch_table_opt = "--tabfile";
+$cmsearch_table_opt = "--tblout" if ( $cmsearch_help =~ /--tblout/ );
+my $cmsearch_noalign_opt = "--noalign";
+$cmsearch_noalign_opt = "--noali" if ( $cmsearch_help !~ /--noalign/ && $cmsearch_help =~ /--noali/ );
+my $cmsearch_cpu_opt = "";
+my $cmcalibrate_cpu_opt = "";
+
+my $OPTS_cmsearch = " -g $cmsearch_filter_opt $cmsearch_noalign_opt ";
 my $OPTS_cmbuild = "";
 my $OPTS_cmcalibrate = " -L 0.01 ";
 
@@ -42,6 +60,7 @@ usage()
   "tgtdir=s"         => \$tgtdir,
   "stk=s"            => \$stk_file,
   "db=s"             => \$db,
+  "cpu=i"            => \$cpu_threads,
   "calibrate"        => \$use_cmcalibrate,
   "verbose"          => \$verbose
   );
@@ -57,6 +76,12 @@ $cm_top_only = $CONFIG{cm_top_only};
 my $infernal_path = $CONFIG{PATH_INFERNAL};
 my $cm_bitscore_sig = $CONFIG{cm_bitscore_sig};
 my $cm_min_bitscore = $CONFIG{cm_min_bitscore};
+
+$cpu_threads = 1 if ( !$cpu_threads || $cpu_threads < 1 );
+$cmsearch_cpu_opt = " --cpu $cpu_threads " if ( $cmsearch_help =~ /--cpu/ );
+$cmcalibrate_cpu_opt = " --cpu $cpu_threads " if ( $cmcalibrate_help =~ /--cpu/ );
+$OPTS_cmsearch .= $cmsearch_cpu_opt;
+$OPTS_cmcalibrate .= $cmcalibrate_cpu_opt;
 
 ## check top_only option consistency
 ## if we have revcompl seqs than we should also scan on them
@@ -112,8 +137,7 @@ if ($use_cmcalibrate ) {
 ## add '-o $e/$target_file.cm.alignments' if also alignment file should be created
 
 my $tmp_tab_file = "$tgtdir/$target_file.cm.tab_tmp";
-my $cmd_cms = "$infernal_path/cmsearch $OPTS_cmsearch --tabfile $tmp_tab_file ";
-#my $cmd_cms = "$infernal_path/cmsearch  $OPTS_cmsearch -tblout $tmp_tab_file ";
+my $cmd_cms = "$infernal_path/cmsearch $OPTS_cmsearch $cmsearch_table_opt $tmp_tab_file ";
 $cmd_cms .= "--toponly " if ($cm_top_only);
 my $min_bitscore = min(10,$cm_min_bitscore);
 $cmd_cms .= "-T $min_bitscore " if ($cm_bitscore_sig == 1);

@@ -26,3 +26,7 @@
 *.exe
 *.out
 *.app
+
+# Local installation artifacts
+.install-rnaclust/
+config.log

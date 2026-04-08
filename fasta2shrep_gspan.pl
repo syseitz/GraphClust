@@ -465,7 +465,7 @@ while ( my $seq = shift @used_seqs ) {
 
     if ( $GSPANNO > 1 ) {
       close($out);
-      system("mv $gspanfile.bz2 $i_o/$group_idx.group.gspan.bz2");
+      system("mv $gspanfile.bz2 $i_o/$group_idx.group.gspan.bz2 2>/dev/null");
       if ($out_no_match_shape){
         close($out_no_match_shape);
         system("mv $gspanfile.no_match $i_o/$group_idx.group.gspan.no_match");
@@ -594,7 +594,7 @@ while ( my $seq = shift @used_seqs ) {
 
 if ($i_groupsize) {
   close($out);
-  system("mv $gspanfile.bz2 $i_o/$group_idx.group.gspan.bz2");
+  system("mv $gspanfile.bz2 $i_o/$group_idx.group.gspan.bz2 2>/dev/null");
   close($out_no_match_shape) if ($out_no_match_shape);
   move "$gspanfile.no_match", "$i_o/$group_idx.group.gspan.no_match" if ($out_no_match_shape);
 } elsif ( $out_no_match_shape && !$i_stdout && !$i_groupsize ) {
@@ -653,19 +653,39 @@ sub call_RNAshapes {
   ($seq_fasta) or die("INPUT ERROR in $FUNCTION: the fasta file is compulsory!\n");
   ($rnashapes_location) or die( "INPUT ERROR in $FUNCTION: the RNAshapes location" . " is compulsory!\n" );
   die "$rnashapes_location does not exist! Exit...\n\n" if ( !-e $rnashapes_location );
-  my $call = $rnashapes_location . " -o 1 ";    # the output format is of type 1
-  $call .= "-q " if ($q);
-  $call .= "-T $T " if ( $q and $T );
-  $call .= "-w $win_size ";
-  $call .= "-W $shift " if ($i_shift);
+  my $modern_cli = is_modern_RNAshapes_cli($rnashapes_location);
+  my $call = $rnashapes_location . " ";
+
+  if ($modern_cli) {
+    $call .= "--windowSize $win_size ";
+    $call .= "--windowIncrement $shift " if ($i_shift);
+  } else {
+    $call .= "-o 1 ";    # the output format is of type 1
+    $call .= "-w $win_size ";
+    $call .= "-W $shift " if ($i_shift);
+  }
+
   die("ERROR in $FUNCTION: Give only one of the options -c or -e (RNAshapes)!\n")
 
     if ( $e && $c );
-  $call .= "-e $e " if ($e);
-  $call .= "-c $c " if ($c);
-  $call .= "-t $t " if ($t);
-  $call .= "-u "    if ( $u and not $i );       ## not possible in sampling mode
-  $call .= "-r "    if ($r);
+
+  if ($modern_cli) {
+    $call .= "--absoluteDeviation $e " if ($e);
+    $call .= "--relativeDeviation $c " if ($c);
+    $call .= "--shapeLevel $t " if ($t);
+    $call .= "--allowLP 0 " if ( $u and not $i );       ## best-effort equivalent for legacy '-u'
+    $call .= "--structureProbs 1 " if ($r);
+    $call .= "--shapeLevel $q " if ($q);
+  } else {
+    $call .= "-q " if ($q);
+    $call .= "-T $T " if ( $q and $T );
+    $call .= "-e $e " if ($e);
+    $call .= "-c $c " if ($c);
+    $call .= "-t $t " if ($t);
+    $call .= "-u "    if ( $u and not $i );       ## not possible in sampling mode
+    $call .= "-r "    if ($r);
+  }
+
   $call .= "-m $matchShape " if ($matchShape);
 
   ## check is a bit long but : we want to sample if the window is larger than $sample_length and full seq is larger than window or sample_len
@@ -675,9 +695,27 @@ sub call_RNAshapes {
 
   ($i_debug) and print STDERR "$seqLen $sample_length $win_size $call\n";
 
-  open my $rnashapesoutput, "$call |" or die( "ERROR in $FUNCTION: The following call " . "could not be carried out!\n$call\n" );
+  open my $rnashapesoutput, "$call 2>&1 |" or die( "ERROR in $FUNCTION: The following call " . "could not be carried out!\n$call\n" );
 
   return $rnashapesoutput;
+}
+
+sub is_modern_RNAshapes_cli {
+  my ($rnashapes_location) = @_;
+
+  open my $help_fh, "$rnashapes_location --help 2>&1 |"
+    or die "ERROR: cannot inspect RNAshapes help for '$rnashapes_location'\n";
+
+  my $modern_cli = 0;
+  while ( my $line = <$help_fh> ) {
+    if ( $line =~ /--windowSize/ || $line =~ /version 3\./ ) {
+      $modern_cli = 1;
+      last;
+    }
+  }
+
+  close($help_fh);
+  return $modern_cli;
 }
 
 ############################################################################
@@ -704,8 +742,7 @@ sub call_RNAshapes {
 sub convert_RNAshapes_output {
   my ( $rnashapesoutput, $curr_gi, $maxShreps, $graph_file_hdl, $graphHead, $winSize, $seqLen, $used_t, $annotate, $abstr, $cue, $stacks, $orig_seq ) = @_;
 
-  ## omit first line in output, contains fasta header line
-  my $line       = <$rnashapesoutput>;
+  my $line;
   my $win_shreps = [];
   my $win_start;
   my $win_end;
@@ -715,11 +752,66 @@ sub convert_RNAshapes_output {
   my $winHead;
   my $win_globalFolding;
   my $win_size_real;
+  my $skip_warning_block = 0;
 
   # reading RNAshapes output
   while ( $line = <$rnashapesoutput> ) {
+    if ( $line =~ /^WARNING$/ ) {
+      $skip_warning_block = 1;
+      next;
+    }
 
-    if ( $line =~ /^(\d+)\s+(\d+)$/ ) {
+    if ($skip_warning_block) {
+      if ( $line =~ /^>.*$/ ) {
+        $skip_warning_block = 0;
+      } else {
+        next;
+      }
+    }
+
+    next if ( $line =~ /^>.*$/ );
+    next if ( $line =~ /^$/ );
+
+    if ( $line =~ /^\s*(\d+)\s+([A-Za-z]+)\s+(\d+)\s*$/ ) {
+      ## RNAshapes 3.x window format: "<start> <sequence> <end>"
+
+      if ( @{$win_shreps} > 0 ) {
+
+        print $graph_file_hdl $winHead;
+
+        if ($i_add_seq_graph_t) {
+          my @new_win_shreps = ();
+          map { push( @new_win_shreps, $_ ) if ( $_->[ $#{$_} ] ne "_" ) } @{$win_shreps};
+          $win_shreps = \@new_win_shreps;
+        }
+
+        if ($i_add_seq_graph_win ) {
+          ( $curr_gi ) = convertSeqWindow( $win_seq, $win_size_real,
+            $win_start, $curr_gi, $winHead, $graph_file_hdl, $annotate, $orig_seq );
+        }
+
+        $curr_gi = convertShapeWindow( $win_shreps, $win_seq, $win_size_real,
+          $win_start, $curr_gi, $graph_file_hdl, $winHead, $annotate, $abstr,
+          $cue, $stacks, $orig_seq );
+      }
+
+      $win_shreps      = [];
+      $win_start       = $1;
+      $win_seq         = uc($2);
+      $win_end         = $3;
+      $win_shrep_count = 0;
+      $win_size_real   = $win_end - $win_start + 1;
+
+      if ( ($win_size_real) >= $seqLen ) {
+        $win_globalFolding = 1;
+      } else {
+        $win_globalFolding = 0;
+      }
+      my $win_center = $win_start + ( ( $win_size_real + 1 ) / 2 );
+
+      $winHead = getWindowHeader( $graphHead, $winSize, $win_start, $win_end, $win_center, $win_globalFolding, $win_sample, $used_t );
+
+    } elsif ( $line =~ /^(\d+)\s+(\d+)$/ ) {
       ## line: "<start>    <end>"
 
       if ( @{$win_shreps} > 0 ) {
@@ -773,6 +865,12 @@ sub convert_RNAshapes_output {
       ## line: "Shape [] not found within energy range (-24.75 to -27.50). Try -c or -e to increase range."
       $win_shreps      = [];
 
+    } elsif ( $line =~ /^\s*(\S+)\s+([\(\)\.]+)\s+(\S+)\s*$/ ) {
+      ## RNAshapes 3.x result format: "<energy> <structure> <shape>"
+      next if ( $maxShreps && $win_shrep_count >= $maxShreps );
+      push( @{$win_shreps}, [ $2, "ENERGY", $1, "SHAPE", $3 ] );
+      $win_shrep_count++;
+
     } elsif ( $line =~ /^([\(\)\.]+)\s+\((\S+)\)\s+(\S+)$/ ) {
       ## line:"...((((..(((....)))))))...........(((((......)))))  (-10.10)  [[]][]"
       ## take only $maxShreps shreps per window if set
@@ -802,7 +900,6 @@ sub convert_RNAshapes_output {
       $win_shrep_count++;
 
     } else {
-      next if ( $line =~ /^$/ );
       die "Unexpected shape output format!\nline=$line\n\nExit...\n\n";
     }
   }
@@ -2406,4 +2503,3 @@ sub getSeqHeader {
 
 # If a sequence graph option is given, then these graphs (u #) have to
 # be labelled with this annotation
-

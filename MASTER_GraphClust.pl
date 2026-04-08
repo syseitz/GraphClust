@@ -14,6 +14,7 @@ my $THREADS_ENABLED = $Config{useithreads};
 use threads;    # qw( async );
 use threads::shared;
 use Thread::Queue qw( );
+use Thread::Semaphore;
 
 use File::Temp qw(tempdir);
 use IO::Handle;
@@ -165,6 +166,8 @@ my $nspdk_fcs;
 my $input_add_revcompl;
 my $input_blastclust_id;
 my $input_blastclust_len;
+my $input_mmseqs2_id;
+my $input_mmseqs2_len;
 my $input_seq_min_length;
 my $input_win_shift;
 my $input_win_size;
@@ -215,6 +218,16 @@ $SIG{'KILL'}    = 'end_handler';
 ## tmp
 my $tmp;
 $tmp = $CONFIG{PATH_TMP} or $tmp = '/var/tmp/';
+my $tmp_env = $CONFIG{PATH_TMP};
+$tmp_env = '/tmp/' if ( !$tmp_env || $tmp_env eq "false" );
+$ENV{TMPDIR} = $tmp_env;
+if ( $CONFIG{PATH_MMSEQS2} && $CONFIG{PATH_MMSEQS2} ne "false" ) {
+  my $lib_path = $CONFIG{PATH_MMSEQS2};
+  $lib_path =~ s/\/bin\/?$/\/lib/;
+  if ( -d $lib_path ) {
+    $ENV{DYLD_LIBRARY_PATH} = $lib_path . ( $ENV{DYLD_LIBRARY_PATH} ? ":" . $ENV{DYLD_LIBRARY_PATH} : "" );
+  }
+}
 my $tmp_template = 'MASTER_GRAPHCLUST-XXXXXX';
 
 # CLEANUP => 1 : automatically delete at exit
@@ -240,12 +253,21 @@ $NUM_THREADS = 1 if ( !$THREADS_ENABLED || $in_SGE_KILL );
 my %jobs_active;    ## active jobs/threads/sge tasks
 my @workers;        ## worker threads if we use threads
 my $q = Thread::Queue->new();    ## thread queue
+my $cpu_slots = Thread::Semaphore->new($NUM_THREADS);
+my $NSPDK_BIN = resolveNSPDKbinary();
 
 if ( $NUM_THREADS > 1 ) {
   for ( 1 .. $NUM_THREADS ) {
     push @workers, async {
-      while ( defined( my $call = $q->dequeue() ) ) {
+      while ( defined( my $work = $q->dequeue() ) ) {
+        my $call  = $work->[0];
+        my $slots = $work->[1];
+        $slots = 1 if ( !$slots || $slots < 1 );
+        $slots = $NUM_THREADS if ( $slots > $NUM_THREADS );
+
+        $cpu_slots->down($slots);
         my $ret = call_thread($call);
+        $cpu_slots->up($slots);
 
         if ($ret != 0){
           print "Error during thread call:\n$call\n";
@@ -306,13 +328,16 @@ if ( !-e "$FASTA_DIR/data.fasta" ) {
   my $fasta_opts = "--prefix $DATA_prefix --tgtdir $FASTA_DIR ";
   $fasta_opts .= "--winsize $input_win_size ";
   $fasta_opts .= "--winshift $input_win_shift ";
-  $fasta_opts .= "--bc-len $input_blastclust_len ";
-  $fasta_opts .= "--bc-id $input_blastclust_id ";
+  $fasta_opts .= "--blastclust-len $input_blastclust_len ";
+  $fasta_opts .= "--blastclust-id $input_blastclust_id ";
+  $fasta_opts .= "--mmseqs2-len $input_mmseqs2_len ";
+  $fasta_opts .= "--mmseqs2-id $input_mmseqs2_id ";
   $fasta_opts .= "--min-len $input_seq_min_length ";
   $fasta_opts .= "--revcompl " if ($input_add_revcompl);
   $fasta_opts .= "--add-rc-sig " if ( !$CONFIG{cm_top_only} );
   $fasta_opts .= "--evaluate " if ($evaluate);
   $fasta_opts .= "--no-bc " if ( !$CONFIG{input_blastclust} );
+  $fasta_opts .= "--no-mmseqs2 " if ( !$CONFIG{input_mmseqs2} );
   $fasta_opts .= "--gl $in_grey_list_file " if ($in_grey_list_file);
   $fasta_opts .= "--gl-num " . $CONFIG{nspdk_greylist_num} . " " if ( $CONFIG{nspdk_greylist_num} );
 
@@ -374,7 +399,7 @@ if ( !-e "$SVECTOR_DIR/svector.groups.DONE" ) {
   #$CMD_gspanGroups->[2] = "$in_debug";       ## additional arg for sge script
   $CMD_gspanGroups->[2] = "0";                ## never turn on debug mode, only useful in rare cases
   #$CMD_gspanGroups->[3] = "$BIN_DIR/EDeN";
-  $CMD_gspanGroups->[3] = "$BIN_DIR/NSPDK";
+  $CMD_gspanGroups->[3] = $NSPDK_BIN;
   $CMD_gspanGroups->[4] = "$OPTS_nspdk";
   #--action FEATURE --binary_file_type --file_type GRAPH -r 3 -d 3 --graph_type DIRECTED --kernel_type NSPDK -i 1.group.gspan
 
@@ -597,7 +622,7 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
     system("ln -f -s $SVECTOR_DIR/data.svector $SVECTOR_DIR/data.svector.$CI");
 
     my $CMD_fastClusterNSPDK = [];
-    $CMD_fastClusterNSPDK->[0] = "$BIN_DIR/NSPDK";
+    $CMD_fastClusterNSPDK->[0] = $NSPDK_BIN;
     $CMD_fastClusterNSPDK->[1] =
       "-no-cache -rs $CI -fsb $SVECTOR_DIR/data.svector.$CI -bl $SVECTOR_DIR/data.svector.blacklist.$CI $OPTS_nspdk_centers -knn $nspdk_knn_center -ss " . $GLOBAL_num_clusters . " -nhf $nspdk_nhf -mi $nspdk_mi -fcs $nspdk_fcs ";
 
@@ -740,6 +765,7 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
       my $curr_cmsearch_dir = "$curr_cluster_dir/CMSEARCH";
       my $params_cmsearcher = "--root $in_ROOTDIR -tgtdir $curr_cmsearch_dir ";
       $params_cmsearcher .= "-stk $curr_cluster_dir/MODEL/model.stk -db $FASTA_DIR/data.fasta.scan ";
+      $params_cmsearcher .= "--calibrate " if ( $CONFIG{cm_calibrate} );
       $params_cmsearcher .= "--verbose " if ($in_verbose);
 
       ##########################################################################################
@@ -821,8 +847,22 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
         $CMD_alignRange->[2] = "perl $BIN_DIR/graphClust_AlignRange.pl";
         $CMD_alignRange->[3] = "--root-dir $in_ROOTDIR --tgtdir $CLUSTER_DIR/$clus_idx.cluster -dpdir $pp_dir --locarna-path " . $CONFIG{PATH_LOCARNA} . "/locarna ";
 
+        my $stage6_cpu_threads = 1;
+        my $stage6_qsub_opts   = "";
+        my $stage6_local_slots = 1;
+
+        if ( $in_USE_SGE && $SGE_PE_THREADS > 1 ) {
+          $stage6_cpu_threads = $SGE_PE_THREADS;
+          $stage6_qsub_opts .= " -pe \"$in_SGE_PE_name\" 1-$SGE_PE_THREADS ";
+        } elsif ( $NUM_THREADS > 1 ) {
+          $stage6_cpu_threads = $NUM_THREADS;
+          $stage6_local_slots = $NUM_THREADS;
+        }
+
+        $CMD_alignRange->[3] .= "--cpu $stage6_cpu_threads ";
+
         my $sge_status =
-          job_call( $job_name, "$BIN_DIR/graphClust_AlignRange.sge", $CMD_alignRange, $sge_paligs_tasks, $SGE_ERR_DIR, $in_USE_SGE, $paligs_sge_log, "$EVAL_DIR/times/time.stage.6.$clus_idx", 0, "", $NUM_THREADS, $job_uuid, $job_task_finished{$job_uuid} );
+          job_call( $job_name, "$BIN_DIR/graphClust_AlignRange.sge", $CMD_alignRange, $sge_paligs_tasks, $SGE_ERR_DIR, $in_USE_SGE, $paligs_sge_log, "$EVAL_DIR/times/time.stage.6.$clus_idx", 0, $stage6_qsub_opts, $NUM_THREADS, $job_uuid, $job_task_finished{$job_uuid}, $stage6_local_slots );
 
         $job_task_finished{$job_uuid} = $sge_status->[2];
 
@@ -906,7 +946,21 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
         $CMD_stage8->[0] = "perl $BIN_DIR/gc_cmsearch.pl";
         $CMD_stage8->[1] = "$params_cmsearcher";
 
-        my $sge_status = job_call( $job_name, "$BIN_DIR/gc_cmsearch.sge", $CMD_stage8, 1, $SGE_ERR_DIR, $in_USE_SGE, "$curr_cmsearch_dir/SGE_log", "$EVAL_DIR/times/time.stage.8.$clus_idx", 0, "", $NUM_THREADS, $job_uuid );
+        my $stage8_cpu_threads = 1;
+        my $stage8_qsub_opts   = "";
+        my $stage8_local_slots = 1;
+
+        if ( $in_USE_SGE && $SGE_PE_THREADS > 1 ) {
+          $stage8_cpu_threads = $SGE_PE_THREADS;
+          $stage8_qsub_opts .= " -pe \"$in_SGE_PE_name\" 1-$SGE_PE_THREADS ";
+        } elsif ( $NUM_THREADS > 1 ) {
+          $stage8_cpu_threads = $NUM_THREADS;
+          $stage8_local_slots = $NUM_THREADS;
+        }
+
+        $CMD_stage8->[1] .= "--cpu $stage8_cpu_threads ";
+
+        my $sge_status = job_call( $job_name, "$BIN_DIR/gc_cmsearch.sge", $CMD_stage8, 1, $SGE_ERR_DIR, $in_USE_SGE, "$curr_cmsearch_dir/SGE_log", "$EVAL_DIR/times/time.stage.8.$clus_idx", 0, $stage8_qsub_opts, $NUM_THREADS, $job_uuid, undef, $stage8_local_slots );
 
         if ( $sge_status->[0] == 1 && $sge_status->[1] == 0 ) {
           ## stage 8 sge finished without error
@@ -1103,7 +1157,9 @@ sub filterGreylistCenters {
 ## JOB.ERROR files is used for normal case that the full job produced some error
 ## and we want to avoid a re-submitting (both for wait=1 and wait = 0)
 sub job_call {
-  my ( $JOB_NAME, $JOB_script, $JOB_opts, $JOB_num_tasks, $JOB_sge_errdir, $JOB_sge_use, $JOB_sge_logdir, $JOB_times_file, $JOB_wait, $QSUB_opts, $THREADS_NUM, $JOB_UUID, $finished_last ) = @_;
+  my ( $JOB_NAME, $JOB_script, $JOB_opts, $JOB_num_tasks, $JOB_sge_errdir, $JOB_sge_use, $JOB_sge_logdir, $JOB_times_file, $JOB_wait, $QSUB_opts, $THREADS_NUM, $JOB_UUID, $finished_last, $LOCAL_TASK_SLOTS ) = @_;
+
+  $LOCAL_TASK_SLOTS = 1 if ( !$LOCAL_TASK_SLOTS || $LOCAL_TASK_SLOTS < 1 );
 
   ## (finished?, error?, jobs_finished, jobs_all, $job_resubmit)
   my $sge_status = [ 0, 1, 0, 0, 0 ];
@@ -1114,7 +1170,7 @@ sub job_call {
     system("\\rm -f $JOB_sge_logdir/*");
     system("echo  \`date\` > $JOB_times_file.master");
     system( "echo " . time . " >> $JOB_times_file.master" );
-    my $err = job_submit( $JOB_script, $JOB_opts, $JOB_num_tasks, $JOB_sge_errdir, $JOB_sge_use, $JOB_sge_logdir, $QSUB_opts, $THREADS_NUM, $JOB_UUID );
+    my $err = job_submit( $JOB_script, $JOB_opts, $JOB_num_tasks, $JOB_sge_errdir, $JOB_sge_use, $JOB_sge_logdir, $QSUB_opts, $THREADS_NUM, $JOB_UUID, $LOCAL_TASK_SLOTS );
 
     if ($err) {
       print "Error during job call/submission of $JOB_script!\n";
@@ -1356,10 +1412,26 @@ sub setConfig {
 
   $input_blastclust_id  = $CONFIG{input_blastclust_id};
   $input_blastclust_len = $CONFIG{input_blastclust_len};
+  $input_mmseqs2_id     = $CONFIG{input_mmseqs2_id};
+  $input_mmseqs2_len    = $CONFIG{input_mmseqs2_len};
   $input_seq_min_length = $CONFIG{input_seq_min_length};
   $input_add_revcompl   = $CONFIG{input_add_revcompl};
   $input_win_size       = $CONFIG{input_win_size};
   $input_win_shift      = $CONFIG{input_win_shift};
+}
+
+sub resolveNSPDKbinary {
+  my @candidates = (
+    "$BIN_DIR/NSPDK",
+    "$BIN_DIR/.install-rnaclust/bin/NSPDK",
+    "$BIN_DIR/NSPDK_src/NSPDK",
+  );
+
+  foreach my $candidate (@candidates) {
+    return $candidate if ( -e $candidate && -x $candidate );
+  }
+
+  die "Cannot find NSPDK binary in $BIN_DIR or $BIN_DIR/NSPDK_src. Exit...\n\n";
 }
 
 sub cleanStage {
@@ -1490,7 +1562,9 @@ sub makeBlacklist {
 }
 
 sub job_submit {
-  my ( $CALL_script, $CALL_OPTS, $SGE_JOBS, $SGE_ERRDIR, $SGE_USE, $SGE_LOGDIR, $QSUB_OPTS, $THREADS, $JOB_UUID ) = @_;
+  my ( $CALL_script, $CALL_OPTS, $SGE_JOBS, $SGE_ERRDIR, $SGE_USE, $SGE_LOGDIR, $QSUB_OPTS, $THREADS, $JOB_UUID, $LOCAL_TASK_SLOTS ) = @_;
+
+  $LOCAL_TASK_SLOTS = 1 if ( !$LOCAL_TASK_SLOTS || $LOCAL_TASK_SLOTS < 1 );
 
   # !! check refactor !!!
 
@@ -1542,7 +1616,7 @@ sub job_submit {
 
         my $call = "cd $CURRDIR; $CALL_script $CURRDIR $SGE_LOGDIR $t $call_str 1>$SGE_ERRDIR/$JOB_UUID.out.$t 2>$SGE_ERRDIR/$JOB_UUID.err.$t;";
 
-        $q->enqueue($call);
+        $q->enqueue( [ $call, $LOCAL_TASK_SLOTS ] );
       }
 
     } else {
@@ -1876,7 +1950,7 @@ continue GraphClust.
 File which contain your input sequences. There are several parameters
 which influences the preprocessing of your data (see README).
 The default case splits your input in 150nt fragments with 50%
-overlap. BlastClust is used to filter out near identical fragments.
+overlap. MMseqs2 is used to filter out near identical fragments.
 
 =back
 
