@@ -33,16 +33,17 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install llvm
 
-      # The bundled config.sub is from 2013 and does not recognise modern
-      # Apple Silicon (arm64-apple-darwin24) or recent Linux triples.
-      - name: Update config.sub / config.guess
+      # The bundled config.sub and install-sh are from 2013.  Fetch current
+      # versions from GNU upstream: config.sub/guess for modern host triples,
+      # install-sh because the old version uses plain mkdir (fails on macOS
+      # when the target directory already exists).
+      - name: Update config.sub / config.guess / install-sh
         run: |
-          curl -fsSL \
-            "https://git.savannah.gnu.org/cgit/config.git/plain/config.sub" \
-            -o config.sub
-          curl -fsSL \
-            "https://git.savannah.gnu.org/cgit/config.git/plain/config.guess" \
-            -o config.guess
+          BASE="https://git.savannah.gnu.org/cgit"
+          curl -fsSL "${BASE}/config.git/plain/config.sub"       -o config.sub
+          curl -fsSL "${BASE}/config.git/plain/config.guess"     -o config.guess
+          curl -fsSL "${BASE}/automake.git/plain/lib/install-sh" -o install-sh
+          chmod +x install-sh
 
       - name: Configure (Linux)
         if: runner.os == 'Linux'
