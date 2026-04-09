@@ -18,15 +18,12 @@ if [ ! -f Makefile ] || [ configure -nt Makefile ]; then
   ./configure 2>&1 | tee configure.log
 fi
 
-# On ARM (Apple Silicon): patch the generated cmfinder04/Makefile to add -DHMMER_THREADS
-# (the bundled Infernal 1.1 builds with impl_dummy on ARM, but cmfinder04 needs this define)
-ARCH=$(uname -m)
-if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
-  echo "ARM detected — ensuring -DHMMER_THREADS is set for cmfinder04..."
-  if ! grep -q "DHMMER_THREADS" cmfinder04/Makefile 2>/dev/null; then
-    sed -i.bak 's|^DEFAULT_INCLUDES = \(.*\)|DEFAULT_INCLUDES = \1 -DHMMER_THREADS|' cmfinder04/Makefile
-    rm -f cmfinder04/Makefile.bak
-  fi
+# Ensure -DHMMER_THREADS is set in cmfinder04/Makefile
+# (needed on all platforms — cmfinder.c guards esl_threads.h behind this define)
+if ! grep -q "DHMMER_THREADS" cmfinder04/Makefile 2>/dev/null; then
+  echo "Patching cmfinder04/Makefile to add -DHMMER_THREADS..."
+  sed -i.bak 's|^DEFAULT_INCLUDES = \(.*\)|DEFAULT_INCLUDES = \1 -DHMMER_THREADS|' cmfinder04/Makefile
+  rm -f cmfinder04/Makefile.bak
 fi
 
 # Build everything (Infernal libs + ViennaRNA 1.4 + cmfinder04)
