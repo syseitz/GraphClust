@@ -95,7 +95,10 @@ if ( -e "$rootDir/RESULTS/partitions/final_partition.soft" && -e "$rootDir/RESUL
   map { $exist_part_used{ $_->[0] } = 1 } @{$used_cm};
 }
 
-foreach my $file ( glob( "$rootDir" . "/CLUSTER/*.cluster/CMSEARCH/*.tabresult" ) ) {
+foreach my $file (
+  glob( "$rootDir/CLUSTER/*.cluster/CMSEARCH/*.tabresult" ),
+  glob( "$rootDir/CLUSTER/*.cluster/CMSEARCH/expand.iter*/*.tabresult" )
+) {
 
   next if $file !~ /CLUSTER\/(\d+)\.(\d+)\.cluster\//;
 
