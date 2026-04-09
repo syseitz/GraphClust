@@ -37,6 +37,7 @@ usage()
   "max-iter=i"    => \$max_iter,
   "cpu=i"         => \$cpu_threads,
   "verbose"       => \$verbose,
+  "task-id=i"     => \(my $task_id),  # passed by SGE wrapper, not used directly
   );
 
 ################################################################################

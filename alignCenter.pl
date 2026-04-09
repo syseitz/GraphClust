@@ -282,7 +282,8 @@ if ( $center_model_type == 5 ) {
   my $fa_ext_merged = GraphClust::mergeFrags( \@fa_ext_all );
   GraphClust::writeSubsetFasta( $fa_ext_merged, $fa_ext_merged->[1], "$model_dir/cmfinder.fa", 1 );
   system("rm -f $model_dir/model.cmfinder.stk");
-  system_call( $cmfinder_path . "cmfinder --g 1.0 -a $model_dir/model.tree.stk $model_dir/cmfinder.fa $model_dir/model.cmfinder.cm > $model_dir/model.cmfinder.stk", 1 );
+  # Exit code 2 means "no acceptable motif found" (not a hard error) — ignore it
+  system( $cmfinder_path . "cmfinder -a $model_dir/model.tree.stk -o $model_dir/model.cmfinder.stk $model_dir/cmfinder.fa" );
   system("rm -f $model_dir/model.cmfinder.cm");
 
   ## can be empty in case cmfinder does not find anything
