@@ -45,6 +45,16 @@ jobs:
           curl -fsSL "${BASE}/automake.git/plain/lib/install-sh" -o install-sh
           chmod +x install-sh
 
+      # Prevent make from trying to regenerate autotools files
+      # (aclocal, automake, autoconf are not installed in CI).
+      # Touch in dependency order so make sees them as up-to-date.
+      - name: Fix autotools timestamps
+        run: |
+          sleep 1 && touch aclocal.m4
+          sleep 1 && touch configure
+          sleep 1 && find . -name Makefile.am -exec touch {} +
+          sleep 1 && find . -name Makefile.in -exec touch {} +
+
       - name: Configure (Linux)
         if: runner.os == 'Linux'
         shell: bash -el {0}
@@ -81,6 +91,8 @@ jobs:
         run: |
           perl -c MASTER_GraphClust.pl
           perl -c gc_cmsearch.pl
+          perl -c gc_cm_expand.pl
+          perl -c gc_results_cluster.pl
           perl -c fasta2shrep_gspan.pl
 
       # Verify the --threads patch landed in the installed script.
