@@ -2057,26 +2057,41 @@ sub read_CM_tabfile_ext {
     chomp $line;
     my @line = split( " ", $line );
 
-    next if ( @line != 9 );
+    ## Support both Infernal 1.0 (9 columns) and Infernal 1.1 tblout (>=17 columns)
+    my ( $seqid, $start, $stop, $bitscore, $evalue, $strand_col );
+    if ( @line == 9 ) {
+      ## Infernal 1.0 tabfile format
+      ( $seqid, $start, $stop, $bitscore, $evalue ) = @line[1,2,3,6,7];
+      $strand_col = "+";
+    } elsif ( @line >= 17 ) {
+      ## Infernal 1.1 tblout format:
+      ## seqname  dummy  mdlname  dummy  type  mdl_from  mdl_to  seq_from  seq_to  strand  trunc  pass  gc  bias  score  E-value  inc ...
+      ( $seqid, $start, $stop, $bitscore, $evalue, $strand_col ) = @line[0,7,8,14,15,9];
+    } else {
+      next;
+    }
 
-    $use_e_values = 1 if ( $line[7] ne "-" );
+    $use_e_values = 1 if ( $evalue ne "-" );
 
     my $strand = "+";
     my $hit    = {
-      SEQID    => $line[1],
-      START    => $line[2],
-      STOP     => $line[3],
-      BITSCORE => $line[6],
-      EVALUE   => $line[7],
+      SEQID    => $seqid,
+      START    => $start,
+      STOP     => $stop,
+      BITSCORE => $bitscore,
+      EVALUE   => $evalue,
       STRAND   => $strand,
       NAME     => $tab_name
     };
 
     ## swap start for reverse strand hits, we treat all hits based on + strand
-    if ( $line[2] > $line[3] ) {
+    if ( $start > $stop ) {
       $strand        = "-";
-      $hit->{START}  = $line[3];
-      $hit->{STOP}   = $line[2];
+      $hit->{START}  = $stop;
+      $hit->{STOP}   = $start;
+      $hit->{STRAND} = $strand;
+    } elsif ( $strand_col eq "-" ) {
+      $strand        = "-";
       $hit->{STRAND} = $strand;
     }
 
