@@ -10,15 +10,19 @@ require Exporter;
 
 our %CONFIG = (
 
-  PATH_LOCARNA       => "/usr/local/user/locarna-1.7.2/bin/",
-  PATH_RNASHAPES     => "/usr/local/rnashapes/2.1.6/bin//",
-  PATH_VRNA          => "/usr/local/user/ViennaRNA-2.0.7/bin/",
-  PATH_INFERNAL      => "/usr/local/infernal/1.0.2/bin//",
-  PATH_R             => "/usr/bin/",
-  PATH_RNAZ          => "/usr/local/rnaz/2.1-a0130d9/bin//",
-  PATH_BLASTCLUST    => "/usr/local/ncbiblast/2.2.15/bin//",
-  PATH_OCTAVE        => "/usr/bin/",
-  PATH_CMFINDER      => "/usr/local/user/cmfinder-0.2/bin/",
+  PATH_LOCARNA       => "/Users/yannick/.local/share/mamba/envs/rnaclust/bin/",
+  PATH_RNASHAPES     => "/Users/yannick/.local/share/mamba/envs/rnaclust/bin/",
+  PATH_VRNA          => "/Users/yannick/.local/share/mamba/envs/rnaclust/bin/",
+  PATH_INFERNAL      => "/Users/yannick/.local/share/mamba/envs/rnaclust/bin/",
+  PATH_R             => "/Users/yannick/.local/share/mamba/envs/rnaclust/bin/",
+  PATH_RNAZ          => "/Users/yannick/.local/share/mamba/envs/rnaclust/bin/",
+  PATH_RSCAPE        => "/Users/yannick/.local/share/mamba/envs/rnaclust/bin/",
+  PATH_BLASTCLUST    => "/Users/yannick/.local/share/mamba/envs/rnaclust/bin/",
+  PATH_MMSEQS2       => "false",
+  PATH_OCTAVE        => "false",
+  cm_expand_max_iter => 3,
+  ## CMfinder04: bundled source in cmfinder_src/, build with: bash cmfinder_src/build.sh
+  PATH_CMFINDER      => "/Volumes/Masterarbeit/GraphClust/cmfinder_src/bin/",
 
   VERSION_INFO       =>  "GraphClust 0.7.6",
 

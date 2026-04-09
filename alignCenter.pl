@@ -64,6 +64,27 @@ $tree_aligs_local = 1 if ( $OPTS_locarna_paligs =~ /local/ || $OPTS_locarna_pali
 $center_model_type = 1 if ((!-e "$cmfinder_path"."cmfinder" || !-e "$cmfinder_path/cmfinder") || ($cmfinder_path eq "false" && $center_model_type == 5) );
 
 my $bin_dir = abs_path($FindBin::Bin);
+my $pgma_bin = resolveLocalBinary( $bin_dir, "pgma" );
+
+sub resolveLocalBinary {
+  my $base_dir = $_[0];
+  my $binary   = $_[1];
+
+  my @candidates = (
+    "$base_dir/$binary",
+    "$base_dir/.install-rnaclust/bin/$binary",
+  );
+
+  foreach my $candidate (@candidates) {
+    return $candidate if ( -e $candidate && -x $candidate );
+  }
+
+  my $loc = `which $binary 2>/dev/null`;
+  chomp($loc);
+  return $loc if ( $loc && -e $loc && -x $loc );
+
+  die "Cannot find required binary '$binary'. Exit...\n\n";
+}
 
 ################################################################################
 
@@ -662,7 +683,7 @@ sub matrix2tree {
   mkdir($tree_dir);
   system("cat $matrix_file | awk '{for(i=1;i<NR;i++){print NR,i,\$(i)}}' > $tree_dir/tree.score-list");
   system("perl $bin_dir/rnaclustScores2Dist.pl --quantile 1.0 < $tree_dir/tree.score-list > $tree_dir/tree.dist-list");
-  system("$bin_dir/pgma $names_file $tree_dir/tree.dist-list > $tree_outfile");
+  system("$pgma_bin $names_file $tree_dir/tree.dist-list > $tree_outfile");
 }
 
 sub locarnaAligs2matrix {
@@ -891,7 +912,7 @@ sub computeTreeAligsLocP {
         print LOG $call_eval;
         close(LOG);
 
-        my @rel = readpipe("perl $locarna_path/reliability-profile.pl -v -fit-once-on --structure-weight=1  --fit-penalty 0.01 --beta 200 --show-sw --out=$resDir/$im_filename.rel_plot.pdf $tgtDir/$id/intermediates/intermediate$iidx.aln $tgtDir/$id/intermediates/intermediate$iidx.aln.bmreliability");
+        my @rel = readpipe("perl $locarna_path/reliability-profile.pl -v -fit-once-on --structure-weight=1 --fit-penalty 0.01 --beta 200 --show-sw --dont-plot --out=$resDir/$im_filename.rel_plot.pdf $tgtDir/$id/intermediates/intermediate$iidx.aln $tgtDir/$id/intermediates/intermediate$iidx.aln.bmreliability");
         open( REL, ">$resDir/$im_filename.rel_signal" );
         print REL @rel[ 0 .. 2 ];
         print REL "REL_SCORES " . join( ":", @rel_scores ) . "\n";
@@ -1097,4 +1118,3 @@ sub locarnaP_aln2bmrels {
   my $name = $1;
   MLocarna::write_bm_reliabilities( "$out_dir/$name.bmreliability", $bmrels_seq_ref, $bmrels_str_ref );
 }
-

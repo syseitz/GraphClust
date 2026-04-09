@@ -2,11 +2,20 @@ ACLOCAL_AMFLAGS = -I m4
 
 SUBDIRS = NSPDK_src pgma_src Array Statistics
 
+## Build CMfinder04 if on a compatible platform (Linux x86_64 with SSE).
+## On Apple Silicon, this target is skipped — the pipeline falls back to
+## LocARNA-only mode (center_model_type=1) automatically.
+cmfinder:
+	@bash $(srcdir)/cmfinder_src/build.sh
+
+.PHONY: cmfinder
+
 bin_SCRIPTS = GraphClust_config.pm GraphClust.pm	\
 	      ari.m \
 	      matrixSignificance.R	\
 	      alignCenter.pl alignCenter.sge	\
 	      gc_cmsearch.pl gc_cmsearch.sge	\
+	      gc_cm_expand.pl gc_cm_expand.sge motif_plot.py	\
 	      gc_jobscript.sge \
 	      gc_results_cluster.pl \
 	      fasta2shrep_gspan.pl fasta2shrep_gspan.sge	\
@@ -27,6 +36,7 @@ EXTRA_DIST=   examples/config.default_global	\
               matrixSignificance.R	\
 	      alignCenter.pl alignCenter.sge	\
 	      gc_cmsearch.pl gc_cmsearch.sge	\
+	      gc_cm_expand.pl gc_cm_expand.sge motif_plot.py	\
 	      gc_jobscript.sge \
 	      gc_results_cluster.pl \
 	      fasta2shrep_gspan.pl fasta2shrep_gspan.sge	\

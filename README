@@ -49,7 +49,8 @@ PERL (with installed modules Math::Round, threads, Threads::Queue)
 The following tools are only needed if special parameters are used:
 
 CMfinder 0.2		(only with center_model_type = 5)
-blastclust (NCBI)	(only with input_blastclust = 1)
+blastclust			(default Stage-1 prefilter)
+MMseqs2			(optional, only with input_mmseqs2 = 1 and input_blastclust = 0)
 R (with package "evd")  (only with cm_bitscore_sig <1)
 Octave			(only with evaluate = 1)
 
@@ -106,7 +107,7 @@ Call the MASTER script as follows:
 !!! the source folder!!!
 
 Using the default config file, your input is fragmented into 150nt long sequences
-with 50% overlap. BlastClust is used to remove highly similar fragments.
+with 50% overlap. MMseqs2 is used to remove highly similar fragments.
 Clustering is performed on all remaining fragments. GraphClust runs for 2
 iterations and produce 5 candidate clusters/models per iteration. Final cluster
 results you find in <ROOT-DIR>/RESULTS (sub folders with a running index). Please
@@ -127,7 +128,7 @@ MASTER Options
 
 				See section "GraphClust Config" for all paramters
 				influencing the processing of input sequences,
-				like splitting into fragments, blastclust prefiltering,
+				like splitting into fragments, MMseqs2 prefiltering,
 				minimal sequence length etc.
 
 	--config <FILE>		Simple text file with all configuration parameters.
@@ -456,20 +457,38 @@ input_add_revcompl            1		(true/false)
 	scanning by cmsearch on reverse strand in stage 8 and you don't need to set
 	'cm_top_only 0' (i.e. force cmserach to scan on both strands).
 
-input_blastclust              1		(true/false)
+input_blastclust             1		(true/false)
 
-	Apply blastclust (1=ON,0=OFF) as prefilter to identify near identicals.
-	From each blastclust cluster only one sequence is kept. Please note that
-	blastclust is applied on fragments resulting from the sliding window.
+	Apply blastclust (1=ON,0=OFF) as default prefilter to identify near
+	identicals. From each blastclust cluster only one sequence is kept.
+	Please note that blastclust is applied on fragments resulting from the
+	sliding window.
 
-input_blastclust_id           90	(% sequence identity)
+input_blastclust_id          90	(% sequence identity)
 
-	Blastclust sequence identity cutoff in %, everything with higher
-	sequnence identity is treated as cluster
+	blastclust sequence identity cutoff in %, everything with higher
+	sequence identity is treated as cluster
 
-input_blastclust_len          0.90 	(length fraction)
+input_blastclust_len         0.90 	(length fraction)
 
-	Blastclust length threshold. Sequence identity is checked for this
+	blastclust length threshold. Sequence identity is checked for this
+	length fraction.
+
+input_mmseqs2                0		(true/false)
+
+	Apply MMseqs2 (1=ON,0=OFF) as optional prefilter to identify near
+	identicals. MMseqs2 is only used if blastclust is disabled.
+	Please note that MMseqs2 is applied on fragments resulting from the
+	sliding window.
+
+input_mmseqs2_id             90	(% sequence identity)
+
+	MMseqs2 sequence identity cutoff in %, everything with higher
+	sequence identity is treated as cluster
+
+input_mmseqs2_len            0.90 	(length fraction)
+
+	MMseqs2 length threshold. Sequence identity is checked for this
 	length fraction.
 
 

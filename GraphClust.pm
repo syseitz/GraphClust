@@ -132,6 +132,9 @@ our %CONFIG = (
   input_blastclust     => 1,
   input_blastclust_id  => 90,
   input_blastclust_len => 0.9,
+  input_mmseqs2        => 0,
+  input_mmseqs2_id     => 90,
+  input_mmseqs2_len    => 0.9,
   input_seq_min_length => 30,
   input_win_size       => 150,
   input_win_shift      => 50,
@@ -186,6 +189,11 @@ sub SUBSECTION {
   print "---------------------------------------------------------------------\n";
 }
 
+sub canonicalConfigKey {
+  my $key = $_[0];
+  return $key;
+}
+
 sub readConfigFile {
   my $conf_file  = $_[0];
   my $force_load = $_[1];
@@ -206,6 +214,8 @@ sub readConfigFile {
       my $opt = $ent[0];
       @ent = ( $opt, $join_opt );
     }
+
+    $ent[0] = canonicalConfigKey( $ent[0] );
 
     if ( @ent == 2 ) {
       if ( exists $CONFIG{ $ent[0] } ) {
@@ -1299,7 +1309,7 @@ sub mlocarna_center {
     ## check mlocarna internal plfold call opts, like prob-cutoff etc.
     ## really use plfold? prob-cutoff is not set in mlocarna and default is 0.01
     system_call( "$loc_path/mlocarna $OPTS_locarna_p_model --verbose --probabilistic --tgtdir $dir $fasta > $dir/locarnaP.out 2>&1 ", 1 );
-    my $rel_cmd = "$loc_path/reliability-profile.pl -v -fit-once-on --structure-weight=1  --fit-penalty 0.01 --beta 200 --show-sw --out=$dir/results/result.aln.rel_plot.pdf $dir";
+    my $rel_cmd = "$loc_path/reliability-profile.pl -v -fit-once-on --structure-weight=1 --fit-penalty 0.01 --beta 200 --show-sw --dont-plot --out=$dir/results/result.aln.rel_plot.pdf $dir";
     print $rel_cmd. "\n";
     my @rel = readpipe($rel_cmd);
     open( REL, ">$dir/results/result.aln.rel_signal" );

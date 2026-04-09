@@ -17,6 +17,7 @@ our %CONFIG = (
   PATH_R             => "@R_BINPATH@",
   PATH_RNAZ          => "@RNAZ_BINPATH@",
   PATH_BLASTCLUST    => "@BLASTCLUST_BINPATH@",
+  PATH_MMSEQS2       => "false",
   PATH_OCTAVE        => "@OCTAVE_BINPATH@",
   PATH_CMFINDER      => "@CMFINDER_BINPATH@",
 

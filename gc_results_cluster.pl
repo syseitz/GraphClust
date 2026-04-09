@@ -125,8 +125,8 @@ foreach my $res_idx (@res_todo) {
     map { $model_ids{$_} = 1 } @{ $model_fa[1] };
   }
 
-  ## annotate %clus_hits with TYPE=MODEL or TYPE=BLASTCLUST
-  my ( $model_map, $bc_map ) = getHitMap( $in_root_dir, \%clus_hits, \%model_ids );
+  ## annotate %clus_hits with TYPE=MODEL or TYPE=PREFILTER
+  my ( $model_map, $prefilter_map ) = getHitMap( $in_root_dir, \%clus_hits, \%model_ids );
 
   ## write out current cluster as partition
   open( PART, ">$clus_dir/cluster.part" );
@@ -225,10 +225,32 @@ foreach my $res_idx (@res_todo) {
   }
 
 #    my $seqs_bc = grep { $hits_all{$_}->[0] > 0 && $hits_all{$_}->[1] eq "BLASTCL" } sort { $hits_all{$b}->[0] <=> $hits_all{$a}->[0] } keys %hits_all;
+
+  ## Read R-scape and CM expansion stats (from Stage 8b)
+  my %expand_stats = ( pairs => 0, signif => 0, evalue => '-', iters => 0, added => 0 );
+  foreach my $orig_cl (@orig_clus) {
+    my $f = "$in_root_dir/CLUSTER/$orig_cl.cluster/expand.stats";
+    if ( -e $f ) {
+      open( my $EXP, $f );
+      my $line = <$EXP>;
+      close($EXP);
+      chomp $line;
+      $expand_stats{pairs}  = $1 if ( $line =~ /RSCAPE_PAIRS (\S+)/ );
+      $expand_stats{signif} = $1 if ( $line =~ /RSCAPE_SIGNIF (\S+)/ );
+      $expand_stats{evalue} = $1 if ( $line =~ /RSCAPE_EVALUE (\S+)/ );
+      $expand_stats{iters}  = $1 if ( $line =~ /EXPAND_ITERS (\S+)/ );
+      $expand_stats{added}  = $1 if ( $line =~ /EXPAND_SEQS_ADDED (\S+)/ );
+      last;
+    }
+  }
+
   open( STAT, ">$clus_dir/cluster.stats" );
 
   print STAT "CLUSTER $clus_idx SEQS " . scalar(@clus_keys) . " ";
   print STAT "IDS_UNIQUE " . scalar(@ids_unique) . " MODELS " . scalar(@orig_clus) . " MPI_TOP5 $top5_rnaz->[0] SCI_TOP5 $top5_rnaz->[9] ";
+  print STAT "RSCAPE_PAIRS $expand_stats{pairs} RSCAPE_SIGNIF $expand_stats{signif} "
+           . "RSCAPE_EVALUE $expand_stats{evalue} "
+           . "EXPAND_ITERS $expand_stats{iters} EXPAND_SEQS_ADDED $expand_stats{added} ";
 
   if ($evaluate) {
     my @res = grep { $_->[1] == $clus_idx && $_->[0] eq "CLUSTER" } @{$summary}[ 0 .. $#res_clus_sort ];
@@ -241,6 +263,14 @@ foreach my $res_idx (@res_todo) {
   close(STAT);
 
 }    ## for all @res_todo
+
+## Generate motif overview plot (requires Python + matplotlib)
+my $motif_plot_script = "$bin_dir/motif_plot.py";
+if ( -e $motif_plot_script ) {
+  my $plot_out = "$in_root_dir/RESULTS/motif_plot.pdf";
+  system_call("python $motif_plot_script $in_root_dir/RESULTS $plot_out", 1);
+  print "Motif plot: $plot_out\n" if ( -e $plot_out );
+}
 
 exit;
 
@@ -426,18 +456,18 @@ sub getHitMap {
   }
 
   my @bc_keys  = keys %blast_cl;
-  my $bc_frags = GraphClust::list2frags( \@bc_keys );
+  my $prefilter_frags = GraphClust::list2frags( \@bc_keys );
 
   my $hit_frags = [];
   map { push( @{$hit_frags}, $clus_href->{$_}->{FRAG} ) } keys %{$clus_href};
   @{$hit_frags} = sort { $a->{SEQID} cmp $b->{SEQID} } @{$hit_frags};
-  my $bc_ols = GraphClust::fragment_overlap( $hit_frags, $bc_frags, 0.51 );
+  my $prefilter_ols = GraphClust::fragment_overlap( $hit_frags, $prefilter_frags, 0.51 );
 
-  my %blast_hits = ();
+  my %prefilter_hits = ();
 
-  foreach my $ol ( @{$bc_ols} ) {
-    $blast_hits{ $hit_frags->[ $ol->[0] ]->{KEY} } = 1;
-    $clus_href->{ $hit_frags->[ $ol->[0] ]->{KEY} }->{TYPE} = "BLASTCLUST";
+  foreach my $ol ( @{$prefilter_ols} ) {
+    $prefilter_hits{ $hit_frags->[ $ol->[0] ]->{KEY} } = 1;
+    $clus_href->{ $hit_frags->[ $ol->[0] ]->{KEY} }->{TYPE} = "PREFILTER";
   }
 
   ###################################
@@ -458,7 +488,7 @@ sub getHitMap {
     $model_map{ $model_frags[ $ol->[0] ]->{VALUE} }->{HIT} = $hit_frags->[ $ol->[1] ]->{KEY};
   }
 
-  return ( \%model_map, \%blast_hits );
+  return ( \%model_map, \%prefilter_hits );
 }
 
 sub fasta2BED {

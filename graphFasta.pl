@@ -32,10 +32,13 @@ my $max_length     = 0;        ## 0 means no splitting
 my $min_seq_length = 5;
 my $blastclust_len = 0.9;
 my $blastclust_id  = 90;
+my $mmseqs2_len    = 0.9;
+my $mmseqs2_id     = 90;
 my $max_N_stretch  = 15;       ## allowed length of stretch of N's
 my $in_winShift    = 100;      ## window shift in percent
 my $in_evaluate;
 my $in_no_blastclust_filter;
+my $in_no_mmseqs2_filter;
 my $in_grey_list;
 my $in_nspdk_greylist_num  = 0;
 my $in_add_rc_class_signal = 0;
@@ -49,6 +52,10 @@ GetOptions(
   "prefix=s"   => \$in_prefix,
   "revcompl"   => \$add_rc,
   "winsize=i"  => \$max_length,
+  "blastclust-id=i" => \$blastclust_id,
+  "blastclust-len=f" => \$blastclust_len,
+  "mmseqs2-id=i" => \$mmseqs2_id,
+  "mmseqs2-len=f" => \$mmseqs2_len,
   "bc-id=i"    => \$blastclust_id,
   "bc-len=f"   => \$blastclust_len,
   "min-len=i"  => \$min_seq_length,
@@ -56,6 +63,7 @@ GetOptions(
   "evaluate"   => \$in_evaluate,
   "add-rc-sig" => \$in_add_rc_class_signal,
   "no-bc"      => \$in_no_blastclust_filter,
+  "no-mmseqs2" => \$in_no_mmseqs2_filter,
   "gl=s"       => \$in_grey_list,
   "gl-num=i"   => \$in_nspdk_greylist_num,
   "class-files-only" =>\$in_class_files_only,
@@ -69,20 +77,25 @@ $in_fasta = $ARGV[0];
 #SUBSECTION("options loaded for glob_results.pl");
 
 ## this is a preconfigured option, so we can use default value
-my $blastclust_path = $CONFIG{PATH_BLASTCLUST};
-$blastclust_path = "" if ( !-e "$blastclust_path" || $blastclust_path eq "false" || $in_no_blastclust_filter);
+my $blastclust_bin = findBinary( $CONFIG{PATH_BLASTCLUST}, "blastclust" );
+my $prefilter_backend = "blastclust";
+$blastclust_bin = "" if ($in_no_blastclust_filter);
 
-## skip blastclust if it cannot be found
-if ( !$in_no_blastclust_filter && (!$blastclust_path || !-e $blastclust_path."blastclust") ) {
-  my $loc = `which blastclust`;
-  chomp($loc);
-  if ( !$loc || !-e $loc ){
-    print "\nCannot find BlastClust! Skip BlastClust step!\n"; 
-    $in_no_blastclust_filter = 1;
-  } else{
-    $blastclust_path = $loc;
+my $mmseqs2_bin = findBinary( $CONFIG{PATH_MMSEQS2}, "mmseqs" );
+$mmseqs2_bin = "" if ($in_no_mmseqs2_filter);
+
+if ( !$blastclust_bin ) {
+  if ( !$in_no_blastclust_filter ) {
+    print "\nCannot find blastclust! ";
   }
-    
+
+  if ($mmseqs2_bin) {
+    print "Use MMseqs2 prefilter instead.\n";
+    $prefilter_backend = "mmseqs2";
+  } else {
+    print "Skip prefilter step!\n" if ( !$in_no_blastclust_filter || !$in_no_mmseqs2_filter );
+    $prefilter_backend = "";
+  }
 }
 
 if ( !$tgtdir ) {
@@ -193,9 +206,12 @@ my $splitWin = $split_wins[0];
 my $frags_shift = splitLengthShift( $frags_splitN, $splitWin, $in_winShift, $max_N_stretch );
 
 my $frags_keep = [ keys %{$frags_shift} ];
-my $frags_reject;
-if ( !$in_no_blastclust_filter ) {
+my $frags_reject = [];
+
+if ( $prefilter_backend eq "blastclust" ) {
   ( $frags_keep, $frags_reject ) = filterFasta_BlastClust( $frags_shift, $blastclust_id, $blastclust_len );
+} elsif ( $prefilter_backend eq "mmseqs2" ) {
+  ( $frags_keep, $frags_reject ) = filterFasta_MMseqs2( $frags_shift, $mmseqs2_id, $mmseqs2_len );
 }
 
 if ($grey_href) {
@@ -219,7 +235,8 @@ print "graphFasta.pl STATS\n\n";
 print "input seqs                                    : " . ( @{ $fa_in[1] } ) . "\n";
 print "    fragments (after removing masked regions) : " . ( map { @{$_} } @{$frags_splitN} ) . "\n";
 print "    fragments (after using windows/shift)     : " . ( keys %{$frags_shift} ) . "\n";
-print "    fragments (after blastclust)              : " . ( @{$frags_keep} ) . "\n";
+my $prefilter_label = $prefilter_backend || "no filter";
+print "    fragments (after $prefilter_label)        : " . ( @{$frags_keep} ) . "\n";
 print "#########################################################################\n";
 
 ################################################################################
@@ -346,7 +363,7 @@ sub writeEvaluateFiles {
   }
   close(CH);
 
-  ## class size info based on original seqs/signals and after blastclust
+  ## class size info based on original seqs/signals and after mmseqs2
   open( CS, ">$tgtdir/class.size" );
 
   $class_names{"0"} = "UNKNOWN";
@@ -603,10 +620,118 @@ sub classSignal2frag {
   return \@frags;
 }
 
+sub findBinary {
+  my $configured_path = $_[0];
+  my $binary_name     = $_[1];
+
+  if ( !$configured_path || $configured_path eq "false" ) {
+    my $loc = `which $binary_name 2>/dev/null`;
+    chomp($loc);
+    return $loc if ( $loc && -e $loc && -x $loc );
+    return "";
+  }
+
+  my $candidate = $configured_path;
+  $candidate =~ s/\/+$//;
+
+  return $candidate if ( -e $candidate && -x $candidate && $candidate =~ /\/$binary_name$/ );
+  return "$candidate/$binary_name" if ( -e "$candidate/$binary_name" && -x "$candidate/$binary_name" );
+
+  my $loc = `which $binary_name 2>/dev/null`;
+  chomp($loc);
+  return $loc if ( $loc && -e $loc && -x $loc );
+
+  return "";
+}
+
+sub buildConnectedComponents {
+  my $seqs_keep = $_[0];
+  my $edges     = $_[1];
+
+  my %order = map { $seqs_keep->[$_] => $_ } 0 .. $#{$seqs_keep};
+  my %seen  = ();
+  my @clusters = ();
+
+  foreach my $seed ( @{$seqs_keep} ) {
+    next if ( $seen{$seed} );
+
+    my @queue = ($seed);
+    my @component = ();
+    $seen{$seed} = 1;
+
+    while (@queue) {
+      my $curr = shift(@queue);
+      push( @component, $curr );
+
+      foreach my $next ( sort { $order{$a} <=> $order{$b} } keys %{ $edges->{$curr} || {} } ) {
+        next if ( $seen{$next} );
+        $seen{$next} = 1;
+        push( @queue, $next );
+      }
+    }
+
+    push( @clusters, \@component );
+  }
+
+  return \@clusters;
+}
+
 sub filterFasta_BlastClust {
-  my $frags  = $_[0];
-  my $bc_id  = $_[1];
-  my $bc_len = $_[2];
+  my $frags          = $_[0];
+  my $blastclust_id  = $_[1];
+  my $blastclust_len = $_[2];
+
+  my @seqs_keep = sort { ( $a =~ /^$SEQPREFIX(\d+)#/ )[0] <=> ( $b =~ /^$SEQPREFIX(\d+)#/ )[0] || ( $a =~ /[^#]+#(\d+)/ )[0] <=> ( $b =~ /[^#]+#(\d+)/ )[0] || $a cmp $b } keys %{$frags};
+  my @seqs_reject = ();
+
+  open( my $FA, ">$tgtdir/intermediate_blastclust.fasta" ) or die "Cannot write $tgtdir/intermediate_blastclust.fasta\n";
+  foreach my $key (@seqs_keep) {
+    my $blast_seq = $frags->{$key};
+    $blast_seq =~ tr/U/T/;
+    print {$FA} ">$key\n";
+    print {$FA} $blast_seq . "\n";
+  }
+  close($FA);
+
+  my $blastclust_out = "$tgtdir/intermediate.blastclust.out";
+  my @blastclust_cmd = (
+    $blastclust_bin,
+    "-i", "$tgtdir/intermediate_blastclust.fasta",
+    "-o", $blastclust_out,
+    "-p", "F",
+    "-S", $blastclust_id,
+    "-L", $blastclust_len,
+    "-b", "T",
+  );
+
+  print "#################################################################################\n";
+  print join( " ", @blastclust_cmd ) . "\n";
+  my $blastclust_status = system(@blastclust_cmd);
+  if ( $blastclust_status != 0 && !-s $blastclust_out ) {
+    die "blastclust failed\n";
+  }
+
+  @seqs_keep = ();
+  open( my $BLAST_IN, "<", $blastclust_out ) or die "Cannot open blastclust output $blastclust_out\n";
+  while ( my $line = <$BLAST_IN> ) {
+    chomp($line);
+    next if ( !$line );
+
+    my @cluster = split( /\s+/, $line );
+    push( @seqs_keep, $cluster[0] );
+    push( @seqs_reject, @cluster[ 1 .. $#cluster ] ) if ( @cluster > 1 );
+  }
+  close($BLAST_IN);
+
+  system("rm -f $tgtdir/intermediate_blastclust.fasta");
+  system("rm -f $blastclust_out");
+  return ( \@seqs_keep, \@seqs_reject );
+}
+
+sub filterFasta_MMseqs2 {
+  my $frags       = $_[0];
+  my $mmseqs2_id  = $_[1];
+  my $mmseqs2_len = $_[2];
 
   my $num_seqs_curr;
   my @seqs_keep = sort { ( $a =~ /^$SEQPREFIX(\d+)#/ )[0] <=> ( $b =~ /^$SEQPREFIX(\d+)#/ )[0] || ( $a =~ /[^#]+#(\d+)/ )[0] <=> ( $b =~ /[^#]+#(\d+)/ )[0] || $a cmp $b } keys %{$frags};
@@ -619,7 +744,7 @@ sub filterFasta_BlastClust {
     $iter++;
 
     my $si = 1;
-    open( FA, ">$tgtdir/intermediate_bc.fasta" );
+    open( FA, ">$tgtdir/intermediate_mmseqs2.fasta" );
     foreach my $key (@seqs_keep) {
       print FA ">$key\n";
       print FA $frags->{$key} . "\n";
@@ -627,39 +752,58 @@ sub filterFasta_BlastClust {
     }
     close(FA);
 
-# system("cp $tgtdir/intermediate_bc.fasta $tgtdir/intermediate.start.fa") if ( $iter == 1 );
-
-    #print "### BLASTCLUST seqs ###\n";
-    my $bc_opts = "-p F -b T -W 20 -S $bc_id -L $bc_len -o $tgtdir/intermediate.bclust.$iter -i $tgtdir/intermediate_bc.fasta";
     print "#################################################################################\n";
-    print "blastclust $bc_opts 2>/dev/null 1>/dev/null";
-    system( $blastclust_path. "blastclust $bc_opts 2>/dev/null" );
+    my $mmseqs2_min_seq_id = $mmseqs2_id / 100.0;
+    my $mmseqs2_out = "$tgtdir/intermediate.mmseqs2.$iter.tsv";
+    my $mmseqs2_tmp = "$tgtdir/intermediate.mmseqs2.tmp.$iter";
+    my $max_hits = scalar(@seqs_keep);
+    my $mmseqs2_cmd = "$mmseqs2_bin easy-search $tgtdir/intermediate_mmseqs2.fasta $tgtdir/intermediate_mmseqs2.fasta $mmseqs2_out $mmseqs2_tmp"
+      . " --dbtype 2 --search-type 3 --strand 2 --alignment-mode 3 --rescore-mode 2"
+      . " --min-seq-id $mmseqs2_min_seq_id -c $mmseqs2_len --cov-mode 0 --seq-id-mode 1"
+      . " --max-seqs $max_hits --mask 0 -e 1000 -v 0 --format-output query,target";
+    print "$mmseqs2_cmd\n";
+    system($mmseqs2_cmd);
 
-    open( BC, "$tgtdir/intermediate.bclust.$iter" );
-    my @clusters = <BC>;
-    close(BC);
-    chomp(@clusters);
+    my %edges = map { $_ => {} } @seqs_keep;
+    open( my $MMSEQS2_IN, "$mmseqs2_out" ) or die "Cannot open MMseqs2 output $mmseqs2_out\n";
+    while ( my $line = <$MMSEQS2_IN> ) {
+      chomp($line);
+      next if ( !$line );
+
+      my @ent = split( "\t", $line );
+      next if ( @ent < 2 );
+      next if ( !$edges{ $ent[0] } || !$edges{ $ent[1] } );
+      next if ( $ent[0] eq $ent[1] );
+
+      $edges{ $ent[0] }->{ $ent[1] } = 1;
+      $edges{ $ent[1] }->{ $ent[0] } = 1;
+    }
+    close($MMSEQS2_IN);
+
+    my $clusters = buildConnectedComponents( \@seqs_keep, \%edges );
 
     $num_seqs_curr = @seqs_keep;
     @seqs_keep     = ();
 
-    open( CL, ">$tgtdir/intermediate.blast_clusters.$iter" );
-    foreach my $clus (@clusters) {
-      my @ent = split( " ", $clus );
+    open( CL, ">$tgtdir/intermediate.mmseqs2_clusters.$iter" );
+    foreach my $clus ( @{$clusters} ) {
+      my @ent = @{$clus};
       push( @seqs_keep, $ent[0] );
       push( @seqs_reject, @ent[ 1 .. $#ent ] ) if ( @ent > 1 );
-      print CL $clus . "\n" if ( scalar(@ent) > 1 );
+      print CL join( " ", @ent ) . "\n" if ( scalar(@ent) > 1 );
     }
     close(CL);
 
     @seqs_keep = shuffle(@seqs_keep);
 
-    print ">>> blastclust  iter = $iter " . scalar(@seqs_keep) . " / $num_seqs_curr / " . ( keys %{$frags} ) . "\n";
+    print ">>> mmseqs2 iter = $iter " . scalar(@seqs_keep) . " / $num_seqs_curr / " . ( keys %{$frags} ) . "\n";
 
   } while ( scalar(@seqs_keep) + 5 <= $num_seqs_curr );
 
-  system("rm $tgtdir/intermediate_bc.fasta");
-  system("rm $tgtdir/intermediate.bclust.*");
+  system("rm -f $tgtdir/intermediate_mmseqs2.fasta");
+  system("rm -f $tgtdir/intermediate.mmseqs2.*.tsv");
+  system("rm -f $tgtdir/intermediate.mmseqs2_clusters.*");
+  system("rm -f -R $tgtdir/intermediate.mmseqs2.tmp.*");
   return ( \@seqs_keep, \@seqs_reject );
 }
 
@@ -720,7 +864,7 @@ sub writeFrags {
   close(MAP);
   close(GL) if ($write_gl);
 
-  ## file with all frags, not blastclust filtered
+  ## file with all frags, not mmseqs2 filtered
   my @all_sorted = sort { ( $a =~ /^$SEQPREFIX(\d+)#/ )[0] <=> ( $b =~ /^$SEQPREFIX(\d+)#/ )[0] || ( $a =~ /[^#]+#(\d+)/ )[0] <=> ( $b =~ /[^#]+#(\d+)/ )[0] || $a cmp $b } keys %{$frags};
   open( IM, ">$prefix.fasta.all_frags" );
 
@@ -1135,9 +1279,9 @@ sub splitMasked {
 #
 #  $num_seqs = @seqs_keep;
 #
-#  #print "### BLASTCLUST seqs ###\n";
-#  #print "blastclust -p F -b F -W 32 -S $blastclust_id -L $blastclust_len -o $tgtdir/intermediate.bclust.$iter -i $tgtdir/intermediate.fasta\n";
-#  system( $blastclust_path. "blastclust -p F -b T -W 32 -S $blastclust_id -L $blastclust_len -o $tgtdir/intermediate.bclust.$iter -i $tgtdir/intermediate.fasta 2>&1 >/dev/null" );
+#  #print "### MMSEQS2 seqs ###\n";
+#  #print "mmseqs easy-search ...\n";
+#  system( $mmseqs2_bin . " easy-search ... " );
 #
 #  open( BC, "$tgtdir/intermediate.bclust.$iter" );
 #  my @clusters = <BC>;
@@ -1163,7 +1307,7 @@ sub splitMasked {
 #  }
 #  close(FA);
 #
-#  print ">>> blastclust  iter = $iter " . scalar(@seqs_keep) . " / $num_seqs / $seq_idx\n";
+#  print ">>> mmseqs2 iter = $iter " . scalar(@seqs_keep) . " / $num_seqs / $seq_idx\n";
 #}
 
 #open( LEN, ">$tgtdir/$fa_name.lens" );

@@ -22,7 +22,11 @@ my $in_verbose;
 my $rnafold_params   = " --noLP ";
 my $rnaplfold_params = " --noLP -c 0.0005 -L 100 -W 200 ";
 
-my $tmp = "/var/tmp/foldfasta_$$";
+my $tmp_root = $ENV{TMPDIR};
+$tmp_root = $GraphClust::CONFIG{PATH_TMP} if ( !$tmp_root || $tmp_root eq "" );
+$tmp_root = "/tmp/" if ( !$tmp_root || $tmp_root eq "false" );
+$tmp_root =~ s/\/+$//;
+my $tmp = "$tmp_root/foldfasta_$$";
 my $in_vrna_path;
 
 GetOptions(

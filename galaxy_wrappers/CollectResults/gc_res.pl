@@ -73,8 +73,8 @@ foreach my $res_idx (@res_todo) {
   }
 
 
-  ## annotate %clus_hits with TYPE=MODEL or TYPE=BLASTCLUST
-  my ( $model_map, $bc_map ) = getHitMap( $in_root_dir, \%clus_hits, \%model_ids );
+  ## annotate %clus_hits with TYPE=MODEL or TYPE=PREFILTER
+  my ( $model_map, $prefilter_map ) = getHitMap( $in_root_dir, \%clus_hits, \%model_ids );
 
   ## write out current cluster as partition
   open( PART, ">$clus_dir.cluster.part" );
@@ -466,18 +466,18 @@ sub getHitMap {
   }
 
   my @bc_keys  = keys %blast_cl;
-  my $bc_frags = list2frags( \@bc_keys );
+  my $prefilter_frags = list2frags( \@bc_keys );
 
   my $hit_frags = [];
   map { push( @{$hit_frags}, $clus_href->{$_}->{FRAG} ) } keys %{$clus_href};
   @{$hit_frags} = sort { $a->{SEQID} cmp $b->{SEQID} } @{$hit_frags};
-  my $bc_ols = fragment_overlap( $hit_frags, $bc_frags, 0.51 );
+  my $prefilter_ols = fragment_overlap( $hit_frags, $prefilter_frags, 0.51 );
 
-  my %blast_hits = ();
+  my %prefilter_hits = ();
 
-  foreach my $ol ( @{$bc_ols} ) {
-    $blast_hits{ $hit_frags->[ $ol->[0] ]->{KEY} } = 1;
-    $clus_href->{ $hit_frags->[ $ol->[0] ]->{KEY} }->{TYPE} = "BLASTCLUST";
+  foreach my $ol ( @{$prefilter_ols} ) {
+    $prefilter_hits{ $hit_frags->[ $ol->[0] ]->{KEY} } = 1;
+    $clus_href->{ $hit_frags->[ $ol->[0] ]->{KEY} }->{TYPE} = "PREFILTER";
   }
 
   ###################################
@@ -498,7 +498,7 @@ sub getHitMap {
     $model_map{ $model_frags[ $ol->[0] ]->{VALUE} }->{HIT} = $hit_frags->[ $ol->[1] ]->{KEY};
   }
 
-  return ( \%model_map, \%blast_hits );
+  return ( \%model_map, \%prefilter_hits );
 }
 
 sub fasta2BED {

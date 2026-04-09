@@ -152,6 +152,42 @@ AC_SUBST(OPENMP_CXXFLAGS)
 CPPFLAGS="$OPENMP_CXXFLAGS $CPPFLAGS"
 LDFLAGS="$OPENMP_CXXFLAGS $LDFLAGS"
 
+# macOS: embed an RPATH for libomp.dylib so binaries (pgma, NSPDK) find it at
+# runtime without requiring DYLD_LIBRARY_PATH.  We first ask the compiler for
+# its library search paths, then fall back to the two standard Homebrew LLVM
+# locations (Apple Silicon and Intel).
+case "$host_os" in
+  darwin*)
+    AC_MSG_CHECKING([for libomp.dylib rpath on macOS])
+    omp_lib_dir=""
+    for dir in $($CXX $CXXFLAGS -print-search-dirs 2>/dev/null | \
+                 grep '^libraries' | sed 's/libraries: =//' | tr ':' ' '); do
+      if test -f "$dir/libomp.dylib"; then
+        omp_lib_dir="$dir"
+        break
+      fi
+    done
+    if test -z "$omp_lib_dir"; then
+      for dir in /opt/homebrew/opt/llvm/lib /usr/local/opt/llvm/lib; do
+        if test -f "$dir/libomp.dylib"; then
+          omp_lib_dir="$dir"
+          break
+        fi
+      done
+    fi
+    if test -n "$omp_lib_dir"; then
+      LDFLAGS="$LDFLAGS -Wl,-rpath,$omp_lib_dir"
+      AC_MSG_RESULT([$omp_lib_dir])
+    else
+      AC_MSG_RESULT([not found, skipping])
+    fi
+    ;;
+esac
+# OMP_LIBDIR is substituted into Makefile.am install-exec-hooks so that
+# install_name_tool can re-embed the RPATH if GNU libtool strips it.
+OMP_LIBDIR="$omp_lib_dir"
+AC_SUBST(OMP_LIBDIR)
+
 #################
 # Debug option
 #

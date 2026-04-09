@@ -1,0 +1,11 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -e $3
+#$ -o $3
+
+## SGE wrapper for gc_cm_expand.pl (Stage 8b: iterative CM expansion + R-scape)
+## $1 = perl command (e.g. "perl /path/to/gc_cm_expand.pl")
+## $2 = arguments string
+## $3 = log directory (used by SGE -e and -o above)
+
+$1 $2

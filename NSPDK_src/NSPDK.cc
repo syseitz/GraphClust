@@ -10,6 +10,7 @@
 #include <list>
 #include <stdio.h>
 #include <omp.h>
+#include <fstream>
 
 using namespace std;
 
@@ -55,6 +56,7 @@ public:
 				mOutputTrueKNNPrediction(false),
 				mOutputHashEncoding(false),
 				mCaching(true),
+			mNoStreaming(false),
 				mTrueSort(true),
 				mEccessNeighbourSizeFactor(10),
 				mHashFactor(1),
@@ -136,6 +138,9 @@ public:
 				<< mNonRedundantFilter << ") (the smaller the less similar the centers)]" << endl
 				<< "[-no-cache flag to deactivate caching of kernel value computation (to minimize memory usage) (default: "
 				<< !mCaching << ")]" << endl
+				<< "[-no-stream flag to load binary input fully into RAM instead of streaming from disk."
+				<< " Faster on machines with sufficient free RAM; uses ~60 KB * n bytes of memory. (default: "
+				<< mNoStreaming << ")]" << endl
 				<< "[-no-true-sort flag to deactivate sorting approximate neighbours with true kernel computation (default: "
 				<< !mTrueSort << ")]" << endl << "[-st <size threshold> (default: "
 				<< mSizeThreshold << ")]" << endl << "[-it <imbalance tolerance> (default: "
@@ -193,6 +198,7 @@ public:
 			else if ((*it) == "-ss") mSampleSize = stream_cast<unsigned>(*(++it));
 			else if ((*it) == "-nrt") mNonRedundantFilter = stream_cast<double>(*(++it));
 			else if ((*it) == "-no-cache") mCaching = false;
+			else if ((*it) == "-no-stream") mNoStreaming = true;
 			else if ((*it) == "-no-true-sort") mTrueSort = false;
 			else if ((*it) == "-nc") mNumCenters = stream_cast<unsigned>(*(++it));
 			else if ((*it) == "-fcs") mFractionCenterScan = stream_cast<double>(*(++it));
@@ -250,6 +256,7 @@ public:
 	bool mOutputTrueKNNPrediction;
 	bool mOutputHashEncoding;
 	bool mCaching;
+	bool mNoStreaming;  // if true, binary input is loaded fully into RAM (faster, more memory)
 	bool mTrueSort;
 	double mEccessNeighbourSizeFactor;
 	unsigned mHashFactor;
@@ -284,16 +291,53 @@ protected:
 	NSPDK_FeatureGenerator* pmFeatureGenerator;
 	NSPDK_FeatureGenerator* pmAbstractFeatureGenerator;
 
-	vector<SVector> mDataset;
+	vector<SVector> mDataset;  // in-memory fallback for gspan / ASCII modes
 	vector<umap_uint_vec_uint> mBinDataStructure;
-	map<pair<unsigned, unsigned>, double> mKernelMap;
+
+	// ---- Streaming dataset ----
+	// For large binary svector files we avoid loading all data into mDataset.
+	// InputSparseStreaming() scans the file once, records byte offsets and
+	// pre-computes hash signatures.  Individual SVector records are then
+	// loaded on demand via DatasetGet() using a shared LRU cache.
+	bool                  mStreamingMode;
+	string                mStreamFilename;
+	vector<long long>     mStreamOffsets;   // byte position of each accepted record
+
+	static const unsigned STREAM_CACHE_SIZE = 4096;  // tune for available RAM
+	struct StreamCacheEntry {
+		SVector                  vec;
+		list<unsigned>::iterator lruIt;
+	};
+	mutable graphclust_compat::unordered_map<unsigned, StreamCacheEntry> mStreamCache;
+	mutable list<unsigned>                                                mStreamLRU;
+	// Use unordered_map with a packed uint64 key instead of std::map<pair<...>>.
+	// std::map stores one heap node (~64 bytes overhead) per entry; with millions of
+	// kernel pairs this wastes ~100-150 MB.  unordered_map stores data inline in
+	// bucket arrays: ~20-24 bytes per entry — 3-4x smaller, O(1) vs O(log n) lookup.
+	struct KernelMapHash {
+		size_t operator()(unsigned long long k) const {
+			// Thomas Wang 64-bit hash mix
+			k = (~k) + (k << 21);
+			k ^= k >> 24;
+			k = (k + (k << 3)) + (k << 8);
+			k ^= k >> 14;
+			k = (k + (k << 2)) + (k << 4);
+			k ^= k >> 28;
+			return static_cast<size_t>(k + (k << 31));
+		}
+	};
+	graphclust_compat::unordered_map<unsigned long long, double, KernelMapHash> mKernelMap;
 	//multimap<unsigned, unsigned> mInvertedIndex;
-	umap_uint_vec_uint mSignatureMap;
+	// Replace unordered_map<unsigned, vector<unsigned>> with a flat vector indexed
+	// by instance ID.  Direct index is O(1) with no hash overhead, and the vector
+	// is pre-allocated in PrecomputeSignatures() so parallel reads are safe.
+	vector<vector<unsigned>> mSignatureCache;
 
 	double mAlpha;
 	vector<double> mApproximateDensityMap;
 	vector<double> mTrueDensityMap;
-	umap_uint_vec_uint mApproximateNeighborhoodMap;
+	// Same replacement as mSignatureCache: direct index instead of unordered_map.
+	vector<vector<unsigned>> mApproximateNeighborhoodCache;
 	vector<unsigned> mIdMap;
 	vector<bool> mFilteredHashFunctionList;
 	vector<int> mGreyList;
@@ -301,8 +345,73 @@ public:
 	NSPDKClass(	NSPDK_FeatureGenerator* paFeatureGenerator,
 				NSPDK_FeatureGenerator* paAbstractFeatureGenerator)
 			: 	pmFeatureGenerator(paFeatureGenerator),
-				pmAbstractFeatureGenerator(paAbstractFeatureGenerator) {
+				pmAbstractFeatureGenerator(paAbstractFeatureGenerator),
+				mStreamingMode(false) {
 	}
+
+	// ---- Streaming dataset accessors ----------------------------------------
+
+	unsigned DatasetSize() const {
+		return mStreamingMode
+			? static_cast<unsigned>(mStreamOffsets.size())
+			: static_cast<unsigned>(DatasetSize());
+	}
+
+	// Returns vector i by value.  In streaming mode, loads from the LRU cache
+	// (or from disk on a miss).  Thread-safe: file I/O runs outside the lock;
+	// only cache bookkeeping holds the OMP critical section.
+	SVector DatasetGet(unsigned i) const {
+		if (!mStreamingMode) return mDataset[i];
+
+		// Fast path: check cache inside lock
+		{
+			SVector cached;
+			bool hit = false;
+			#pragma omp critical (streaming_dataset)
+			{
+				auto it = mStreamCache.find(i);
+				if (it != mStreamCache.end()) {
+					mStreamLRU.splice(mStreamLRU.begin(), mStreamLRU, it->second.lruIt);
+					cached = it->second.vec;
+					hit = true;
+				}
+			}
+			if (hit) return cached;
+		}
+
+		// Slow path: load from disk (no lock held — concurrent loads of the same
+		// index are harmless; only one will actually enter the cache)
+		SVector v;
+		{
+			// Each thread uses its own file handle to avoid seek contention.
+			static thread_local ifstream tl_fin;
+			static thread_local string   tl_open_name;
+			if (tl_open_name != mStreamFilename) {
+				tl_fin.close();
+				tl_fin.open(mStreamFilename.c_str(), ios::binary);
+				tl_open_name = mStreamFilename;
+			}
+			tl_fin.seekg(static_cast<streamoff>(mStreamOffsets[i]));
+			v.load(tl_fin);
+		}
+
+		// Insert into cache (lock again)
+		#pragma omp critical (streaming_dataset)
+		{
+			if (mStreamCache.find(i) == mStreamCache.end()) {
+				if (mStreamCache.size() >= STREAM_CACHE_SIZE) {
+					unsigned evict = mStreamLRU.back();
+					mStreamLRU.pop_back();
+					mStreamCache.erase(evict);
+				}
+				mStreamLRU.push_front(i);
+				mStreamCache.emplace(i, StreamCacheEntry{v, mStreamLRU.begin()});
+			}
+		}
+		return v;
+	}
+
+	// -------------------------------------------------------------------------
 
 	void Generate(const GraphClass& aG, SVector& oX) {
 		//create base graph features
@@ -439,11 +548,76 @@ public:
 	}
 
 	void InputSparse(const string& aInputFileName, string aMode) {
-		ifstream fin;
-		fin.open(aInputFileName.c_str());
-		if (!fin) throw range_error("Cannot open file:" + aInputFileName);
-		InputSparse(fin, aMode, mDataset);
-		fin.close();
+		if (aMode == "binary" && !PARAM_OBJ.mNoStreaming) {
+			// Streaming path: scan file once, record byte offsets, pre-compute
+			// signatures.  Vectors are NOT loaded into mDataset.
+			InputSparseStreaming(aInputFileName);
+		} else {
+			ifstream fin;
+			fin.open(aInputFileName.c_str());
+			if (!fin) throw range_error("Cannot open file:" + aInputFileName);
+			InputSparse(fin, aMode, mDataset);
+			fin.close();
+		}
+	}
+
+	// Streaming load for binary svector files: one sequential pass that records
+	// byte offsets and pre-computes all hash signatures.  After this call,
+	// mSignatureCache is fully populated and DatasetGet() can serve vectors
+	// on demand from disk via the LRU cache.
+	void InputSparseStreaming(const string& aFilename) {
+		mStreamFilename  = aFilename;
+		mStreamingMode   = true;
+		mStreamOffsets.clear();
+		mStreamCache.clear();
+		mStreamLRU.clear();
+
+		// Read whitelist / blacklist (same logic as InputSparse)
+		vector<int> select_list;
+		if (PARAM_OBJ.mWhiteListFileName != "")
+			InputIntList(PARAM_OBJ.mWhiteListFileName, select_list);
+		if (PARAM_OBJ.mBlackListFileName != "")
+			InputIntList(PARAM_OBJ.mBlackListFileName, select_list);
+		if (PARAM_OBJ.mGreyListFileName != "")
+			InputIntList(PARAM_OBJ.mGreyListFileName, mGreyList);
+		set<int> select_set(select_list.begin(), select_list.end());
+
+		cout << "Reading file in binary mode (streaming — vectors not kept in RAM)" << endl;
+		ifstream fin(aFilename.c_str(), ios::binary);
+		if (!fin) throw range_error("Cannot open file:" + aFilename);
+
+		ProgressBar progress_bar;
+		int file_counter = 1;   // 1-based, matches original counter
+		unsigned idx       = 0; // accepted-instance index (0-based)
+
+		while (fin.good() && !fin.eof()) {
+			streampos pos = fin.tellg();   // offset BEFORE reading this record
+			SVector x;
+			x.load(fin);
+			if (!InstanceIsValid(x)) continue;
+
+			bool accept = true;
+			if (PARAM_OBJ.mWhiteListFileName != "")
+				accept = (select_set.count(file_counter) > 0);
+			if (PARAM_OBJ.mBlackListFileName != "")
+				accept = (select_set.count(file_counter) == 0);
+
+			if (accept) {
+				mStreamOffsets.push_back(static_cast<long long>(pos));
+				mIdMap.push_back(file_counter);
+				// Pre-compute hash signature from the vector while it is in RAM,
+				// avoiding a second sequential scan later.
+				if (idx >= mSignatureCache.size())
+					mSignatureCache.resize(idx + 1);
+				mSignatureCache[idx] = ComputeHashSignature(x, idx);
+				++idx;
+			}
+			progress_bar.Count();
+			++file_counter;
+		}
+		cout << "\nStreaming index built: " << idx << " instances, "
+			<< (idx > 0 ? mStreamOffsets.back() / 1024 / 1024 : 0)
+			<< " MB last offset." << endl;
 	}
 
 	void InputSparse(const string& aInputFileName, string aMode, vector<SVector>& oDataset) {
@@ -651,6 +825,22 @@ public:
 
 	}
 
+	// Pre-allocate and populate mSignatureCache sequentially.
+	// In streaming mode, InputSparseStreaming() already did this during the
+	// initial file scan — so we skip the work here.  For in-memory (non-binary)
+	// modes we do the sequential pass now.
+	void PrecomputeSignatures() {
+		if (mStreamingMode) {
+			// Already populated by InputSparseStreaming().
+			cout << "Signatures already computed during streaming load — skipping." << endl;
+			return;
+		}
+		cout << "Pre-computing hash signatures (sequential)..." << endl;
+		mSignatureCache.assign(DatasetSize(), vector<unsigned>());
+		for (unsigned i = 0; i < DatasetSize(); ++i)
+			mSignatureCache[i] = ComputeHashSignature(mDataset[i], i);
+	}
+
 	void ComputeBinDataStructure() {
 		string ofname = "hash_encoding";
 		ofstream of(ofname.c_str());
@@ -658,11 +848,12 @@ public:
 		cout << "Computing bin data structure..." << endl;
 		ProgressBar progress_bar;
 
+		PrecomputeSignatures();
 		InitBinDataStructure();
 		//omp_set_num_threads(PARAM_OBJ.mThreads);
-		//fill structure
+		//fill structure — mSignatureMap is fully populated, so parallel reads are safe
 		#pragma omp parallel for schedule(dynamic,10)
-		for (unsigned i = 0; i < mDataset.size(); ++i) {
+		for (unsigned i = 0; i < DatasetSize(); ++i) {
 			vector<unsigned> min_list = ComputeHashSignature(i);
 			if (PARAM_OBJ.mOutputHashEncoding) {
 				for (unsigned j = 0; j < min_list.size(); j++)
@@ -710,12 +901,12 @@ public:
 	}
 
 	inline vector<unsigned> ComputeHashSignature(unsigned aID) {
-		if (mSignatureMap.count(aID) > 0) return mSignatureMap[aID];
-		else {
-			vector<unsigned> signature = ComputeHashSignature(mDataset[aID], aID);
-			mSignatureMap[aID] = signature;
-			return signature;
-		}
+		// mSignatureCache is pre-allocated by PrecomputeSignatures(); O(1) direct access.
+		if (aID < mSignatureCache.size() && !mSignatureCache[aID].empty())
+			return mSignatureCache[aID];
+		// Fallback for incremental use (e.g. AddToBinDataStructure).
+		SVector v = DatasetGet(aID);
+		return ComputeHashSignature(v, aID);
 	}
 
 	inline vector<unsigned> ComputeHashSignature(SVector& aX, unsigned aID) {
@@ -801,29 +992,25 @@ public:
 	}
 
 	vector<unsigned> ComputeApproximateNeighborhood(unsigned aID, unsigned aSize) {
-//			if (mApproximateNeighborhoodMap.count(aID) == 0) {
-				vector<unsigned> hash_signature = ComputeHashSignature(aID);
-				vector<unsigned> neighborhood = ComputeApproximateNeighborhood(hash_signature,aSize);
-				//select neighborhood under true similarity function on the subset of indiced returned by ComputeApproximateNeighborhood
-				vector<unsigned> true_neighborhood = ComputeTrueSubNeighborhood(aID, neighborhood, aSize);
-
-				mApproximateNeighborhoodMap[aID] = true_neighborhood;
-//			}
-			return mApproximateNeighborhoodMap[aID];
-		}
-
+		vector<unsigned> hash_signature = ComputeHashSignature(aID);
+		vector<unsigned> neighborhood = ComputeApproximateNeighborhood(hash_signature, aSize);
+		vector<unsigned> true_neighborhood = ComputeTrueSubNeighborhood(aID, neighborhood, aSize);
+		if (aID < mApproximateNeighborhoodCache.size())
+			mApproximateNeighborhoodCache[aID] = true_neighborhood;
+		return true_neighborhood;
+	}
 
 	vector<unsigned> ComputeApproximateNeighborhood(unsigned aID) {
-		if (mApproximateNeighborhoodMap.count(aID) == 0) {
-			vector<unsigned> hash_signature = ComputeHashSignature(aID);
-			unsigned aSize = PARAM_OBJ.mEccessNeighbourSizeFactor * PARAM_OBJ.mNumNearestNeighbors;
-			vector<unsigned> neighborhood = ComputeApproximateNeighborhood(hash_signature,aSize);
-			//select neighborhood under true similarity function on the subset of indiced returned by ComputeApproximateNeighborhood
-			vector<unsigned> true_neighborhood = ComputeTrueSubNeighborhood(aID, neighborhood);
-
-			mApproximateNeighborhoodMap[aID] = true_neighborhood;
-		}
-		return mApproximateNeighborhoodMap[aID];
+		if (aID < mApproximateNeighborhoodCache.size()
+				&& !mApproximateNeighborhoodCache[aID].empty())
+			return mApproximateNeighborhoodCache[aID];
+		vector<unsigned> hash_signature = ComputeHashSignature(aID);
+		unsigned aSize = PARAM_OBJ.mEccessNeighbourSizeFactor * PARAM_OBJ.mNumNearestNeighbors;
+		vector<unsigned> neighborhood = ComputeApproximateNeighborhood(hash_signature, aSize);
+		vector<unsigned> true_neighborhood = ComputeTrueSubNeighborhood(aID, neighborhood);
+		if (aID < mApproximateNeighborhoodCache.size())
+			mApproximateNeighborhoodCache[aID] = true_neighborhood;
+		return true_neighborhood;
 	}
 
 	vector<unsigned> ComputeApproximateNeighborhood(const vector<unsigned>& aInstanceSignature, unsigned aSize) {
@@ -833,7 +1020,7 @@ public:
 			unsigned hash_id = aInstanceSignature[k];
 			unsigned collision_size = mBinDataStructure[k][hash_id].size();
 
-			if (collision_size < PARAM_OBJ.mMaxSizeBin * mDataset.size()) {
+			if (collision_size < PARAM_OBJ.mMaxSizeBin * DatasetSize()) {
 				//fill neighborhood set counting number of occurrences
 				for (vector<unsigned>::iterator it = mBinDataStructure[k][hash_id].begin();
 						it != mBinDataStructure[k][hash_id].end(); ++it) {
@@ -899,14 +1086,15 @@ public:
 	}
 
 	vector<unsigned> ComputeTrueNeighborhood(unsigned aID) {
-		const SVector& x = mDataset[aID];
+		SVector x = DatasetGet(aID);  // by value — streaming-safe
 		return ComputeTrueNeighborhood(x);
 	}
 
 	vector<unsigned> ComputeTrueNeighborhood(const SVector& aX) {
 		vector<pair<double, unsigned> > rank_list;
-		for (unsigned i = 0; i < mDataset.size(); ++i) {
-			double k = dot(aX, mDataset[i]);
+		for (unsigned i = 0; i < DatasetSize(); ++i) {
+			SVector vi = DatasetGet(i);
+			double k = dot(aX, vi);
 			rank_list.push_back(make_pair(-k, i));
 		}
 		unsigned effective_size = min((unsigned) rank_list.size(), PARAM_OBJ.mNumNearestNeighbors);
@@ -1011,13 +1199,13 @@ public:
 		double density = 0;
 		if (mTrueDensityMap[aID] == -1) {
 			vector<pair<double, unsigned> > sim_list;
-			for (unsigned j = 0; j < mDataset.size(); j++) {
+			for (unsigned j = 0; j < DatasetSize(); j++) {
 				if (aID != j) {
 					double k_ij = Kernel(aID, j);
 					density += k_ij;
 				}
 			}
-			density = density / (mDataset.size() - 1);
+			density = density / (DatasetSize() - 1);
 			mTrueDensityMap[aID] = density;
 		} else density = mTrueDensityMap[aID];
 		return density;
@@ -1036,7 +1224,7 @@ public:
 																		double aFractionCenterScan,
 																		unsigned aMaxIntersectionSize) {
 		//compute density estimate for random fraction of instances in dataset
-		unsigned data_size = mGreyList.size() > 0 ? mGreyList.size() : mDataset.size();
+		unsigned data_size = mGreyList.size() > 0 ? mGreyList.size() : DatasetSize();
 		unsigned effective_size = floor(data_size * aFractionCenterScan);
 		cout << "using num threads = "<< omp_get_max_threads()<< endl;
 		cout << "Computing approximate density information for random sample of " << effective_size
@@ -1183,7 +1371,7 @@ public:
 
 	vector<unsigned> ComputeNeighborhoodRanking(unsigned aID) {
 		vector<pair<double, unsigned> > sim_list;
-		for (unsigned i = 0; i < mDataset.size(); ++i) {
+		for (unsigned i = 0; i < DatasetSize(); ++i) {
 			if (i != aID) {
 				double k = Kernel(aID, i);
 				sim_list.push_back(make_pair(-k, i)); //note: use -k to sort in decreasing order
@@ -1203,13 +1391,10 @@ public:
 	}
 
 	void OutputCluster(ostream& out, ostream& out2 ) {
-		//initialize density cache
-		mApproximateDensityMap.clear();
-		mTrueDensityMap.clear();
-		for (unsigned i = 0; i < mDataset.size(); ++i) {
-			mApproximateDensityMap.push_back(-1);
-			mTrueDensityMap.push_back(-1);
-		}
+		//initialize density and neighbourhood caches
+		mApproximateDensityMap.assign(DatasetSize(), -1);
+		mTrueDensityMap.assign(DatasetSize(), -1);
+		mApproximateNeighborhoodCache.assign(DatasetSize(), vector<unsigned>());
 
 		vector<unsigned> density_center_list;
 		density_center_list = ComputeMinimallyOverlappingHighDensityCenterList(
@@ -1272,8 +1457,8 @@ public:
 			vector<double> true_density_list;
 			{
 				ProgressBar progress_bar;
-				cout << "Computing true density for all instances " << mDataset.size() << endl;
-				for (unsigned i = 0; i < mDataset.size(); i++) {
+				cout << "Computing true density for all instances " << DatasetSize() << endl;
+				for (unsigned i = 0; i < DatasetSize(); i++) {
 					true_density_list.push_back(ComputeTrueDensity(i));
 					progress_bar.Count();
 				}
@@ -1290,8 +1475,8 @@ public:
 		ProgressBar progress_bar;
 		double cum = 0;
 		unsigned effective_neighbourhood_size = min(PARAM_OBJ.mNumNearestNeighbors,
-				(unsigned) mDataset.size());
-		for (unsigned u = 0; u < mDataset.size(); ++u) {
+				(unsigned) DatasetSize());
+		for (unsigned u = 0; u < DatasetSize(); ++u) {
 			progress_bar.Count();
 			vector<unsigned> approximate_neighborhood = ComputeApproximateNeighborhood(u);
 			set<unsigned> approximate_neighborhood_set;
@@ -1308,7 +1493,7 @@ public:
 			out << val << endl;
 			cum += val;
 		}
-		cout << endl << "Accuracy: " << cum / mDataset.size() << endl;
+		cout << endl << "Accuracy: " << cum / DatasetSize() << endl;
 	}
 
 	void OutputApproximateKNN(ostream& out, ostream& out2) {
@@ -1317,7 +1502,7 @@ public:
 			for (unsigned i = 0; i < mGreyList.size(); ++i)
 				id_list.push_back(mGreyList[i] - 1);
 		} else {
-			for (unsigned i = 0; i < mDataset.size(); ++i)
+			for (unsigned i = 0; i < DatasetSize(); ++i)
 				id_list.push_back(i);
 		}
 		cout << "Compute approximate nearest neighbours for " << id_list.size() << " elements."
@@ -1358,11 +1543,11 @@ public:
 			for (unsigned i = 0; i < mGreyList.size(); ++i)
 				id_list.push_back(mGreyList[i] - 1);
 		} else {
-			for (unsigned i = 0; i < mDataset.size(); ++i)
+			for (unsigned i = 0; i < DatasetSize(); ++i)
 				id_list.push_back(i);
 		}
 		unsigned effective_neighbourhood_size = min(PARAM_OBJ.mNumNearestNeighbors,
-				(unsigned) mDataset.size());
+				(unsigned) DatasetSize());
 		cout << "Compute true " << effective_neighbourhood_size << "-nearest neighbours for "
 				<< id_list.size() << " elements." << endl; ////
 		ProgressBar progress_bar;
@@ -1370,7 +1555,7 @@ public:
 			unsigned u = id_list[i];
 			vector<pair<double, unsigned> > sim_list;
 			//compute kernel pairs between aID and all elements
-			for (unsigned v = 0; v < mDataset.size(); v++) {
+			for (unsigned v = 0; v < DatasetSize(); v++) {
 				double k_uv = Kernel(u, v);
 				sim_list.push_back(make_pair(-k_uv, v)); //note: use -k to sort in decreasing order
 			}
@@ -1471,8 +1656,8 @@ public:
 	void OutputKernel(ostream& out) {
 		cout << "Compute kernel matrix." << endl; ////
 		ProgressBar progress_bar;
-		for (unsigned i = 0; i < mDataset.size(); i++) {
-			for (unsigned j = 0; j < mDataset.size(); j++)
+		for (unsigned i = 0; i < DatasetSize(); i++) {
+			for (unsigned j = 0; j < DatasetSize(); j++)
 				out << Kernel(i, j) << " ";
 			out << endl;
 			progress_bar.Count();
@@ -1480,8 +1665,8 @@ public:
 	}
 
 	void Output(ostream& out) {
-		for (unsigned i = 0; i < mDataset.size(); i++)
-			out << mDataset[i];
+		for (unsigned i = 0; i < DatasetSize(); i++)
+			out << DatasetGet(i);
 	}
 
 	void OutputFeatureMap(string aFileName) const {
@@ -1501,17 +1686,25 @@ public:
 		unsigned i = min(aI, aJ);
 		unsigned j = max(aI, aJ);
 		if (PARAM_OBJ.mCaching) {
-			pair<unsigned, unsigned> key = make_pair(i, j);
-			if (mKernelMap.count(key) == 0) {
+			// Pack (i,j) into a single uint64 key: avoids pair<unsigned,unsigned>
+			// and the std::map tree-node overhead (~64 bytes/entry → ~20 bytes/entry).
+			unsigned long long key = (static_cast<unsigned long long>(i) << 32) | j;
+			auto it = mKernelMap.find(key);
+			if (it == mKernelMap.end()) {
 				double value = Similarity(i, j);
-				mKernelMap[key] = value;
+				mKernelMap.emplace(key, value);
+				return value;
 			}
-			return mKernelMap[key];
+			return it->second;
 		} else return Similarity(i, j);
 	}
 
 	double Similarity(unsigned aI, unsigned aJ) {
-		return dot(mDataset[aI], mDataset[aJ]);
+		// DatasetGet() is streaming-safe: per-thread file handles + shared LRU cache.
+		// Load both vectors before computing dot product.
+		SVector vi = DatasetGet(aI);
+		SVector vj = DatasetGet(aJ);
+		return dot(vi, vj);
 	}
 	/**
 	 Computes the fraction of neighbors that are common between instance I and J

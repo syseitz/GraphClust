@@ -29,9 +29,12 @@ evaluate                      0
 evaluate_class0_as_fp         1
 evaluate_min_overlap          0.51
 input_add_revcompl            0
-input_blastclust              1
-input_blastclust_id           90
-input_blastclust_len          0.9
+input_blastclust             1
+input_blastclust_id          90
+input_blastclust_len         0.9
+input_mmseqs2                0
+input_mmseqs2_id             90
+input_mmseqs2_len            0.9
 input_seq_min_length          30
 input_win_shift               50
 input_win_size                150

@@ -344,5 +344,3 @@ sub readMAF() {
 
 
 
-
-

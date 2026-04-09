@@ -743,8 +743,8 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
 
       ####################################################################################################
       ## model is completely done
-      if ( -e "$CLUSTER_DIR/$clus_idx.cluster/cmsearch.DONE" ) {
-        print "Round $CI cluster $clus_idx stages 6-8 already finished!\n";
+      if ( -e "$CLUSTER_DIR/$clus_idx.cluster/expand.DONE" ) {
+        print "Round $CI cluster $clus_idx stages 6-8b already finished!\n";
         delete $toDo_models{$clus_idx};
         next;
       }
@@ -934,6 +934,19 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
         next;
       }
 
+      ## CPU/SGE settings for stage 8 and 8b
+      my $stage8_cpu_threads = 1;
+      my $stage8_qsub_opts   = "";
+      my $stage8_local_slots = 1;
+
+      if ( $in_USE_SGE && $SGE_PE_THREADS > 1 ) {
+        $stage8_cpu_threads = $SGE_PE_THREADS;
+        $stage8_qsub_opts .= " -pe \"$in_SGE_PE_name\" 1-$SGE_PE_THREADS ";
+      } elsif ( $NUM_THREADS > 1 ) {
+        $stage8_cpu_threads = $NUM_THREADS;
+        $stage8_local_slots = $NUM_THREADS;
+      }
+
       ####################################################################################################
       ## stage 8: infernal stage
 
@@ -945,18 +958,6 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
         my $CMD_stage8 = [];
         $CMD_stage8->[0] = "perl $BIN_DIR/gc_cmsearch.pl";
         $CMD_stage8->[1] = "$params_cmsearcher";
-
-        my $stage8_cpu_threads = 1;
-        my $stage8_qsub_opts   = "";
-        my $stage8_local_slots = 1;
-
-        if ( $in_USE_SGE && $SGE_PE_THREADS > 1 ) {
-          $stage8_cpu_threads = $SGE_PE_THREADS;
-          $stage8_qsub_opts .= " -pe \"$in_SGE_PE_name\" 1-$SGE_PE_THREADS ";
-        } elsif ( $NUM_THREADS > 1 ) {
-          $stage8_cpu_threads = $NUM_THREADS;
-          $stage8_local_slots = $NUM_THREADS;
-        }
 
         $CMD_stage8->[1] .= "--cpu $stage8_cpu_threads ";
 
@@ -975,6 +976,47 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
           $cluster_error++;
         }
       }    ## fi stage 8
+
+      ####################################################################################################
+      ## stage 8b: iterative CM expansion + R-scape
+
+      if (  -e "$CLUSTER_DIR/$clus_idx.cluster/cmsearch.DONE"
+        && !-e "$CLUSTER_DIR/$clus_idx.cluster/expand.DONE" ) {
+
+        my $job_name = "Round $CI cluster $clus_idx stage 8b";
+        my $job_uuid = "stage8b-$clus_idx";
+
+        my $CMD_expand = [];
+        $CMD_expand->[0] = "perl $BIN_DIR/gc_cm_expand.pl";
+        $CMD_expand->[1] = "--root-dir $in_ROOTDIR "
+                         . "--cluster-dir $curr_cluster_dir "
+                         . "--db $FASTA_DIR/data.fasta.scan "
+                         . "--max-iter $CONFIG{cm_expand_max_iter} "
+                         . "--cpu $stage8_cpu_threads ";
+        $CMD_expand->[1] .= "--verbose " if ($in_verbose);
+
+        my $sge_status = job_call(
+          $job_name, "$BIN_DIR/gc_cm_expand.sge", $CMD_expand, 1,
+          $SGE_ERR_DIR, $in_USE_SGE,
+          "$curr_cluster_dir/SGE_log_expand",
+          "$EVAL_DIR/times/time.stage.8b.$clus_idx",
+          0, $stage8_qsub_opts, $NUM_THREADS, $job_uuid, undef, $stage8_local_slots
+        );
+
+        if ( $sge_status->[0] == 1 && $sge_status->[1] == 0 ) {
+          system_call("touch $CLUSTER_DIR/$clus_idx.cluster/expand.DONE");
+          delete $toDo_models{$clus_idx};
+          $trigger_new_partition = 1;
+
+        } elsif ( $sge_status->[1] == 1 ) {
+          print "Round $CI cluster $clus_idx stage 8b: SGE job generated some error! Skip...\n";
+          system_call("touch $CLUSTER_DIR/$clus_idx.cluster/expand.DONE");
+          delete $toDo_models{$clus_idx};
+          $cluster_error++;
+        }
+      }
+
+      next if ( !-e "$CLUSTER_DIR/$clus_idx.cluster/expand.DONE" );
 
     }    ## foreach keys %toDo_models
 

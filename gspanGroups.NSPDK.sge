@@ -16,7 +16,9 @@ shift 6
 cd $working_dir
 id=$$
 
-tmpDir="/var/tmp/gspanGroups_${id}"
+tmpRoot="${TMPDIR:-/tmp}"
+tmpRoot="${tmpRoot%/}"
+tmpDir="${tmpRoot}/gspanGroups_${id}"
 mkdir -p ${tmpDir}
 
 if [ -z "$job_num" ]; then
