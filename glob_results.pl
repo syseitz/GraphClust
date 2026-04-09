@@ -164,6 +164,53 @@ foreach my $file (
   $cm_hitlists{$key}->{HITS} = $cm_hits;
 }
 
+## Build a lookup from SEQ number -> fragment string from data.names
+## so we can add seed sequences (center.ids) to each cluster's hit list
+my %seq_num_to_frag = ();
+if ( open( my $NAMES_FH, "$rootDir/FASTA/data.names" ) ) {
+  while ( my $line = <$NAMES_FH> ) {
+    chomp $line;
+    next unless $line =~ /^\s*(\d+)\s+(SEQ\d+#\d+#\d+#[+-])/;
+    $seq_num_to_frag{$1} = $2;
+  }
+  close($NAMES_FH);
+}
+
+## Add seed sequences from center.ids to each cluster's hit list
+foreach my $key ( keys %cm_hitlists ) {
+  my $ids_file = "$rootDir/CLUSTER/$key.cluster/center.ids";
+  next unless -e $ids_file;
+
+  open( my $IDS_FH, $ids_file ) or next;
+  my $line = <$IDS_FH>;
+  close($IDS_FH);
+  chomp $line if $line;
+  my @seed_nums = split( /\s+/, $line );
+
+  my %existing_seqids = map { $_->{SEQID} => 1 } @{ $cm_hitlists{$key}->{HITS} };
+
+  my @seed_hits = ();
+  foreach my $num ( @seed_nums ) {
+    next unless exists $seq_num_to_frag{$num};
+    my $frag_str = $seq_num_to_frag{$num};
+    $frag_str =~ /^(SEQ\d+)#(\d+)#(\d+)#([+-])$/;
+    my ( $seqid, $start, $stop, $strand ) = ( $1, $2, $3, $4 );
+    next if exists $existing_seqids{$seqid};  # already in cmsearch hits
+    push @seed_hits, {
+      SEQID    => $seqid,
+      START    => $start,
+      STOP     => $stop,
+      BITSCORE => 999,   # high score so seeds are never filtered out
+      EVALUE   => 0,
+      STRAND   => $strand,
+      NAME     => $key,
+    };
+    $existing_seqids{$seqid} = 1;
+  }
+
+  push @{ $cm_hitlists{$key}->{HITS} }, @seed_hits if @seed_hits;
+}
+
 #####################
 
 my $ts = $merge_cluster_ol * 100;
