@@ -112,14 +112,48 @@ def get_matrix_panel(status):
         
     return Panel(table, title=f"Cluster Matrix (1-{len(status)})")
 
+def get_log_panel(root_dir):
+    log_path = os.path.join(root_dir, "pipeline.log")
+    lines = []
+    if os.path.exists(log_path):
+        try:
+            with open(log_path, "r") as f:
+                # Read last 8 lines
+                lines = f.readlines()[-8:]
+        except Exception:
+            lines = ["Error reading pipeline.log"]
+    return Panel("".join(lines), title="Recent Logs")
+
 def main():
     parser = argparse.ArgumentParser(description="GraphClust Live Monitor")
     parser.add_argument("--root-dir", default=".", help="GraphClust root directory")
     parser.add_argument("--interval", type=int, default=2, help="Update interval in seconds")
     args = parser.parse_args()
 
-    console = Console()
-    console.print(f"[bold green]Starting GraphClust Monitor in {args.root_dir}...[/bold green]")
+    root = args.root_dir
+    config = read_config(root)
+    num_clusters = int(config.get("GLOBAL_num_clusters", 80))
+    start_time = time.time()
+    
+    layout = make_layout()
+    with Live(layout, refresh_per_second=1, screen=True):
+        try:
+            while True:
+                cpu, workers = get_sys_info()
+                status = get_cluster_status(root, num_clusters)
+                eta = calculate_eta(status, start_time)
+                
+                # Determine current round (simple heuristic for now)
+                round_num = 1
+                if os.path.exists(os.path.join(root, "1.round.DONE")):
+                    round_num = 2
+                
+                layout["header"].update(get_header_panel(cpu, workers, round_num, eta))
+                layout["body"].update(get_matrix_panel(status))
+                layout["footer"].update(get_log_panel(root))
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            pass
 
 if __name__ == "__main__":
     main()
