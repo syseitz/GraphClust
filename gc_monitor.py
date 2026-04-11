@@ -6,6 +6,9 @@ import psutil
 from rich.console import Console
 from rich.layout import Layout
 from rich.panel import Panel
+from rich.table import Table
+from rich.live import Live
+from rich.progress import ProgressBar
 
 def read_config(root_dir):
     config_path = os.path.join(root_dir, "config")
@@ -56,6 +59,58 @@ def calculate_eta(status, start_time):
     avg_per_cluster = elapsed / done_count
     remaining = (len(status) - done_count) * avg_per_cluster
     return time.strftime("%H:%M:%S", time.gmtime(remaining))
+
+def make_layout():
+    layout = Layout()
+    layout.split(
+        Layout(name="header", size=5),
+        Layout(name="body"),
+        Layout(name="footer", size=10)
+    )
+    return layout
+
+def get_header_panel(cpu, workers, round_num, eta):
+    grid = Table.grid(expand=True)
+    grid.add_column(justify="left")
+    grid.add_column(justify="right")
+    grid.add_row(
+        f"[bold cyan]Pipeline:[/bold cyan] Round {round_num}",
+        f"[bold yellow]CPU:[/bold yellow] {cpu}% | [bold yellow]Workers:[/bold yellow] {workers}"
+    )
+    grid.add_row(
+        f"[bold cyan]ETA:[/bold cyan] {eta}",
+        ""
+    )
+    return Panel(grid, title="System Status")
+
+def get_matrix_panel(status):
+    table = Table.grid(padding=1)
+    # Automatically determine columns based on status size
+    num_cols = 10
+    for _ in range(num_cols):
+        table.add_column()
+    
+    current_row = []
+    # Sort status keys to ensure correct order
+    for i in sorted(status.keys()):
+        s = status[i]
+        color = "white"
+        if s == "done": color = "green"
+        elif s == "expanding": color = "orange3"
+        elif s == "searching": color = "yellow"
+        elif s == "init": color = "blue"
+        
+        current_row.append(f"[{color}]●[/{color}]")
+        if len(current_row) == num_cols:
+            table.add_row(*current_row)
+            current_row = []
+    # Add any remaining icons
+    if current_row:
+        while len(current_row) < num_cols:
+            current_row.append("")
+        table.add_row(*current_row)
+        
+    return Panel(table, title=f"Cluster Matrix (1-{len(status)})")
 
 def main():
     parser = argparse.ArgumentParser(description="GraphClust Live Monitor")
