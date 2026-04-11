@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import argparse
+import psutil
 from rich.console import Console
 from rich.layout import Layout
 from rich.panel import Panel
@@ -35,6 +36,26 @@ def get_cluster_status(root_dir, num_clusters):
         else:
             status[i] = "init"
     return status
+
+def get_sys_info():
+    cpu = psutil.cpu_percent(interval=None)
+    workers = 0
+    for proc in psutil.process_iter(['name']):
+        try:
+            if proc.info['name'] in ['cmsearch', 'mlocarna']:
+                workers += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return cpu, workers
+
+def calculate_eta(status, start_time):
+    done_count = sum(1 for s in status.values() if s == "done")
+    if done_count == 0:
+        return "Calculating..."
+    elapsed = time.time() - start_time
+    avg_per_cluster = elapsed / done_count
+    remaining = (len(status) - done_count) * avg_per_cluster
+    return time.strftime("%H:%M:%S", time.gmtime(remaining))
 
 def main():
     parser = argparse.ArgumentParser(description="GraphClust Live Monitor")
