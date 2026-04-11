@@ -25,28 +25,29 @@
 #ifndef WRAPPER_H
 #define WRAPPER_H 1
 
+#include <atomic>
 
-template <class Rep> 
+template <class Rep>
 class Wrapper
 {
  private:
   Rep *q;
-  Rep *ref(Rep *q) { q->refcount++; return q; }
-  void deref(Rep *q) { if (! --(q->refcount)) delete q; }
+  Rep *ref(Rep *q) { q->refcount.fetch_add(1, std::memory_order_relaxed); return q; }
+  void deref(Rep *q) { if (q->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete q; }
   
  public:
-  Wrapper() 
-    : q(new Rep) { q->refcount = 1; }
+  Wrapper()
+    : q(new Rep) { q->refcount.store(1, std::memory_order_relaxed); }
   Wrapper(Rep *rep)
-    : q(rep) { q->refcount = 1; }
+    : q(rep) { q->refcount.store(1, std::memory_order_relaxed); }
   Wrapper(const Wrapper<Rep> &other) 
     : q(ref(other.q)) {}
   ~Wrapper() 
     { deref(q); }
   Wrapper& operator=(const Wrapper<Rep> &other) 
     { Rep *p = q; q = ref(other.q); deref(p); return *this; }
-  void detach() 
-    { if (q->refcount > 1) { deref(q); q=q->copy(); q->refcount=1; } }
+  void detach()
+    { if (q->refcount.load(std::memory_order_acquire) > 1) { deref(q); q=q->copy(); q->refcount.store(1, std::memory_order_relaxed); } }
   Rep *rep() const
     { return q; }
 };

@@ -26,6 +26,7 @@
 #include <cstring>
 #include <cassert>
 #include <iostream>
+#include <atomic>
 #include "wrapper.h"
 
 
@@ -39,10 +40,10 @@ class FVector
 private:
   struct Rep
   {
-    int refcount;
+    std::atomic<int> refcount;
     int size;
     VFloat *data;
-    Rep() : size(0), data(0) {}
+    Rep() : refcount(0), size(0), data(0) {}
     ~Rep() { delete [] data; }
     void resize(int n);
     Rep *copy();
@@ -107,7 +108,7 @@ public:
 private:
   struct Rep
   {
-    int refcount;
+    std::atomic<int> refcount;
     int npairs;
     int mpairs;
     int size;

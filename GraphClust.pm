@@ -1308,7 +1308,25 @@ sub mlocarna_center {
 
     ## check mlocarna internal plfold call opts, like prob-cutoff etc.
     ## really use plfold? prob-cutoff is not set in mlocarna and default is 0.01
-    system_call( "$loc_path/mlocarna $OPTS_locarna_p_model --verbose --probabilistic --tgtdir $dir $fasta > $dir/locarnaP.out 2>&1 ", 1 );
+    ## Retry up to 3 times: mlocarna has a non-deterministic threading crash
+    ## ("Invalid value for shared scalar" in MatchProbs.pm) caused by Perl's
+    ## threads::shared corrupting deeply nested hashes. Same input usually
+    ## succeeds on retry.
+    my $mloc_cmd = "$loc_path/mlocarna $OPTS_locarna_p_model --threads 1 --verbose --probabilistic --tgtdir $dir $fasta > $dir/locarnaP.out 2>&1 ";
+    my $max_tries = 3;
+    my $success = 0;
+    for my $try ( 1 .. $max_tries ) {
+      system("rm -rf $dir/intermediates $dir/results") if ( $try > 1 );
+      my $rc = system($mloc_cmd);
+      if ( $rc == 0 && -e "$dir/results/result.aln" ) {
+        $success = 1;
+        print "  mlocarna succeeded on attempt $try.\n" if ( $try > 1 );
+        last;
+      }
+      print "  mlocarna failed (attempt $try/$max_tries, exit=$rc) — retrying...\n" if ( $try < $max_tries );
+    }
+    die "ERROR ($0) mlocarna failed after $max_tries attempts.\n\n$mloc_cmd\n" if ( !$success );
+
     my $rel_cmd = "$loc_path/reliability-profile.pl -v -fit-once-on --structure-weight=1 --fit-penalty 0.01 --beta 200 --show-sw --dont-plot --out=$dir/results/result.aln.rel_plot.pdf $dir";
     print $rel_cmd. "\n";
     my @rel = readpipe($rel_cmd);
@@ -1319,7 +1337,7 @@ sub mlocarna_center {
   } else {
 
    #system("mlocarna --sequ-local true --tgtdir $dir $fasta $in_mlocarna_opts");
-    system_call( "$loc_path/mlocarna $OPTS_locarna_model --verbose --skip-pp --tgtdir $dir $fasta > $dir/locarna.out 2>&1 ", 1 );
+    system_call( "$loc_path/mlocarna $OPTS_locarna_model --threads 1 --verbose --skip-pp --tgtdir $dir $fasta > $dir/locarna.out 2>&1 ", 1 );
   }
 
   ## alifold result to get consensus structure string for infernal and some nice pictures

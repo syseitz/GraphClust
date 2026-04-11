@@ -834,7 +834,7 @@ sub computeTreeAligsLocP {
       }
     }
 
-    my $call = "$locarna_path/mlocarna --tgtdir $subtree_dir ";
+    my $call = "$locarna_path/mlocarna --threads 1 --tgtdir $subtree_dir ";
     $call .= "--treefile $tgtDir/$id/$id.subtree " if ($use_sim_tree);
     $call .= "$mloc_Opts --verbose ";
 
@@ -898,7 +898,7 @@ sub computeTreeAligsLocP {
         MLocarna::register_normalized_seqnames( \@names_loh );
         locarnaP_aln2bmrels( "$tgtDir/$id/intermediates/intermediate$iidx.aln", "$tgtDir/$id/probs", 0, "$tgtDir/$id/intermediates" );
         my @rel_scores;
-        my $call_eval = readpipe("$locarna_path/mlocarna --evaluate $resDir/$im_filename --tgtdir $tgtDir/$id $tgtDir/$id.fa");
+        my $call_eval = readpipe("$locarna_path/mlocarna --threads 1 --evaluate $resDir/$im_filename --tgtdir $tgtDir/$id $tgtDir/$id.fa");
         $call_eval =~ /RELIABILITY 1\/COL\s+(\S+)\%/;
         push( @rel_scores, $1 );
         $call_eval =~ /RELIABILITY 2\/COL\s+(\S+)\%/;

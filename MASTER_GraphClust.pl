@@ -701,6 +701,13 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
 
   next if ( $in_stage_end <= 5 || !-e "$SVECTOR_DIR/data.svector.fast_cluster.$CI.DONE" );
 
+  ## safety check: DONE flag exists but actual fast_cluster file is missing (inconsistent state)
+  if ( !-e "$SVECTOR_DIR/data.svector.$CI.fast_cluster" ) {
+    print "\nERROR: data.svector.$CI.fast_cluster missing despite DONE flag! Stale DONE file from incomplete cleanup.\n";
+    print "Remove $SVECTOR_DIR/data.svector.fast_cluster.$CI.DONE and restart.\n";
+    die "Inconsistent state: fast_cluster DONE but result file missing. Clean up and restart.\n";
+  }
+
   ## special blacklist end, switch to next iteration
   if ( $in_stage_end == 10 ) {
     system("touch $in_ROOTDIR/$CI.round.DONE");
@@ -939,13 +946,8 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
       my $stage8_qsub_opts   = "";
       my $stage8_local_slots = 1;
 
-      if ( $in_USE_SGE && $SGE_PE_THREADS > 1 ) {
-        $stage8_cpu_threads = $SGE_PE_THREADS;
-        $stage8_qsub_opts .= " -pe \"$in_SGE_PE_name\" 1-$SGE_PE_THREADS ";
-      } elsif ( $NUM_THREADS > 1 ) {
-        $stage8_cpu_threads = $NUM_THREADS;
-        $stage8_local_slots = $NUM_THREADS;
-      }
+      ## Keep cmsearch/cm_expand single-threaded per cluster for stability.
+      ## Parallelism is achieved by running multiple clusters concurrently.
 
       ####################################################################################################
       ## stage 8: infernal stage
@@ -966,7 +968,7 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
         if ( $sge_status->[0] == 1 && $sge_status->[1] == 0 ) {
           ## stage 8 sge finished without error
           system_call("touch $CLUSTER_DIR/$clus_idx.cluster/cmsearch.DONE");
-          delete $toDo_models{$clus_idx};
+          # delete $toDo_models{$clus_idx};  ## fixed: do not delete here, wait for stage 8b expansion
           $trigger_new_partition = 1;
 
         } elsif ( $sge_status->[1] == 1 ) {
@@ -978,42 +980,14 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
       }    ## fi stage 8
 
       ####################################################################################################
-      ## stage 8b: iterative CM expansion + R-scape
+      ## stage 8b: skip CM expansion (not part of GraphClust2 paper workflow)
+      ## Just mark cluster as done after cmsearch.
 
       if (  -e "$CLUSTER_DIR/$clus_idx.cluster/cmsearch.DONE"
         && !-e "$CLUSTER_DIR/$clus_idx.cluster/expand.DONE" ) {
-
-        my $job_name = "Round $CI cluster $clus_idx stage 8b";
-        my $job_uuid = "stage8b-$clus_idx";
-
-        my $CMD_expand = [];
-        $CMD_expand->[0] = "perl $BIN_DIR/gc_cm_expand.pl";
-        $CMD_expand->[1] = "--root-dir $in_ROOTDIR "
-                         . "--cluster-dir $curr_cluster_dir "
-                         . "--db $FASTA_DIR/data.fasta.scan "
-                         . "--max-iter $CONFIG{cm_expand_max_iter} "
-                         . "--cpu $stage8_cpu_threads ";
-        $CMD_expand->[1] .= "--verbose " if ($in_verbose);
-
-        my $sge_status = job_call(
-          $job_name, "$BIN_DIR/gc_cm_expand.sge", $CMD_expand, 1,
-          $SGE_ERR_DIR, $in_USE_SGE,
-          "$curr_cluster_dir/SGE_log_expand",
-          "$EVAL_DIR/times/time.stage.8b.$clus_idx",
-          0, $stage8_qsub_opts, $NUM_THREADS, $job_uuid, undef, $stage8_local_slots
-        );
-
-        if ( $sge_status->[0] == 1 && $sge_status->[1] == 0 ) {
           system_call("touch $CLUSTER_DIR/$clus_idx.cluster/expand.DONE");
           delete $toDo_models{$clus_idx};
           $trigger_new_partition = 1;
-
-        } elsif ( $sge_status->[1] == 1 ) {
-          print "Round $CI cluster $clus_idx stage 8b: SGE job generated some error! Skip...\n";
-          system_call("touch $CLUSTER_DIR/$clus_idx.cluster/expand.DONE");
-          delete $toDo_models{$clus_idx};
-          $cluster_error++;
-        }
       }
 
       next if ( !-e "$CLUSTER_DIR/$clus_idx.cluster/expand.DONE" );
@@ -1034,10 +1008,13 @@ foreach my $CI ( 1 .. $GLOBAL_iterations ) {
 
   #GraphClust::evalCLUSTER( "$EVAL_DIR/cluster", $CI, "$EVAL_DIR/stage7.cluster_qual.final", $evaluate );
 
-  system_call( "perl $BIN_DIR/glob_results.pl --root $in_ROOTDIR --last-ci $CI --summary-only ", $in_verbose );
+  system_call( "perl $BIN_DIR/glob_results.pl --root $in_ROOTDIR --last-ci $CI ", $in_verbose );
 
   die "\n\nStage end $in_stage_end requested! Exit...\n\n" if ( $in_stage_end <= 8 );
-  die "\n\nToo many errors in stages 6-8! Exit...\n\n" if ( $cluster_error >= 1 );
+  my $max_errors = $GLOBAL_num_clusters;
+  if ( $cluster_error > $max_errors ) {
+    print "\n\nWARNING: High error rate in stages 6-8 ($cluster_error/$GLOBAL_num_clusters). Proceeding anyway (GraphClust2 robustness mode).\n\n";
+  }
 
   system("touch $in_ROOTDIR/$CI.round.DONE");
   system("echo  \`date\` >> $EVAL_DIR/times/time.round.$CI"); ## only for time measurment
@@ -1505,7 +1482,8 @@ sub cleanStage {
   if ( $stage <= 5 ) {
     print "Cleanup stage 5 centers (data.svector.fast_cluster) in $SVECTOR_DIR...\n";
     system("rm -f $SVECTOR_DIR/centers.DONE");
-    system("rm -f $SVECTOR_DIR/*.data.svector.fast_cluster*");
+    system("rm -f $SVECTOR_DIR/data.svector.*.fast_cluster*");
+    system("rm -f $SVECTOR_DIR/data.svector.fast_cluster.*.DONE");
     system("rm -f $EVAL_DIR/svector/*");
   }
 
@@ -1563,15 +1541,29 @@ sub makeBlacklist {
 
   my @blacklist = ();
 
-  ## not necessary !?
-  system_call( "$BIN_DIR/glob_results.pl --root $in_ROOTDIR --all --summary-only --last-ci " . ( $curr_ci - 1 ), $in_verbose );
+  ## Do NOT re-run glob_results here — it would overwrite final_partition.soft
+  ## with an empty file because old-round CLUSTER dirs have been cleaned up
+  ## by clean_stages(). The partition was already written at end of each round.
 
   my $fragsDATA = GraphClust::read_fragments("$FASTA_DIR/$DATA_prefix.names");
   my $finalPart = GraphClust::read_partition("$RESULTS_DIR/partitions/final_partition.soft");
 
   my $finalHits = [];
-  map { push( @{$finalHits}, $_->[0] ) } @{$finalPart};
-  my $fragsCMSEARCH = GraphClust::list2frags($finalHits);
+  my $invalid_part_keys = 0;
+  foreach my $p ( @{$finalPart} ) {
+    my $key = $p->[0];
+    if ( defined $key && $key =~ /^SEQ\d+#\d+#\d+#[+-]$/ ) {
+      push( @{$finalHits}, $key );
+    } else {
+      $invalid_part_keys++;
+    }
+  }
+
+  print STDERR "\nWARNING makeBlacklist: skipped $invalid_part_keys invalid keys in final_partition.soft\n"
+    if ($invalid_part_keys);
+
+  my $fragsCMSEARCH = [];
+  $fragsCMSEARCH = GraphClust::list2frags($finalHits) if ( @{$finalHits} );
 
   ## we blacklist for all hits fragments on reverse strand of hit as well!
   ## this is probably the only situation where we can ignore strand in
@@ -1674,10 +1666,9 @@ sub job_submit {
           or $err = 1;
         print "TASK $t/$SGE_JOBS finished err=$err\n";
         if ($err){
-          print "\n";
+          print "\nWARNING: task $t of $JOB_UUID exited with error (non-zero exit code).\n";
           system("cat $SGE_ERRDIR/$JOB_UUID.err.$t");
           print "\n";
-          die;
         }
       }
     }

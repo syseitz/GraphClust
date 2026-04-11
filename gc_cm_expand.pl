@@ -53,6 +53,7 @@ printConfig( \%CONFIG ) if ($verbose);
 ################################################################################
 
 my $infernal_path  = $CONFIG{PATH_INFERNAL};
+my $locarna_path   = $CONFIG{PATH_LOCARNA};
 my $cmfinder_path  = $CONFIG{PATH_CMFINDER};
 my $rscape_path    = $CONFIG{PATH_RSCAPE};
 my $vrna_path      = $CONFIG{PATH_VRNA};
@@ -61,8 +62,23 @@ my $cm_min_bitscore = $CONFIG{cm_min_bitscore};
 my $cm_bitscore_sig = $CONFIG{cm_bitscore_sig};
 my $cm_max_eval     = $CONFIG{cm_max_eval};
 my $cm_top_only     = $CONFIG{cm_top_only};
+my $cm_calibrate    = $CONFIG{cm_calibrate};
+my $cm_expand_max_total_seqs = $CONFIG{cm_expand_max_total_seqs};
+my $cm_expand_max_new_per_iter = $CONFIG{cm_expand_max_new_per_iter};
 
 $cpu_threads = 1 if ( !$cpu_threads || $cpu_threads < 1 );
+$cm_expand_max_total_seqs = 80
+  if ( !defined($cm_expand_max_total_seqs) || $cm_expand_max_total_seqs !~ /^\d+$/ || $cm_expand_max_total_seqs < 1 );
+$cm_expand_max_new_per_iter = 0
+  if ( !defined($cm_expand_max_new_per_iter) || $cm_expand_max_new_per_iter !~ /^\d+$/ || $cm_expand_max_new_per_iter < 0 );
+
+## Runtime overrides for tuning CPU/RAM tradeoff without code edits
+if ( defined $ENV{GRAPHCLUST_8B_MAX_TOTAL_SEQS} && $ENV{GRAPHCLUST_8B_MAX_TOTAL_SEQS} =~ /^\d+$/ && $ENV{GRAPHCLUST_8B_MAX_TOTAL_SEQS} > 0 ) {
+  $cm_expand_max_total_seqs = $ENV{GRAPHCLUST_8B_MAX_TOTAL_SEQS};
+}
+if ( defined $ENV{GRAPHCLUST_8B_MAX_NEW_PER_ITER} && $ENV{GRAPHCLUST_8B_MAX_NEW_PER_ITER} =~ /^\d+$/ && $ENV{GRAPHCLUST_8B_MAX_NEW_PER_ITER} >= 0 ) {
+  $cm_expand_max_new_per_iter = $ENV{GRAPHCLUST_8B_MAX_NEW_PER_ITER};
+}
 
 ################################################################################
 ## Infernal 1.0.2 / 1.1 compatibility detection
@@ -128,6 +144,9 @@ print "  cluster-dir : $in_cluster_dir\n";
 print "  max-iter    : $max_iter\n";
 print "  db          : $db\n";
 print "  use_cmfinder: $use_cmfinder\n";
+print "  max-total-seqs-per-iter: $cm_expand_max_total_seqs\n";
+print "  max-new-hits-per-iter : "
+    . ( $cm_expand_max_new_per_iter ? $cm_expand_max_new_per_iter : "unlimited" ) . "\n";
 
 ################################################################################
 ## Helper: collect sequence IDs present in a FASTA file
@@ -239,9 +258,10 @@ for my $iter ( 1 .. $max_iter ) {
   ##############################################################################
 
   my $new_hits = extract_new_hits( $current_tabresult, $known_ids );
-  my $num_new  = scalar( @{$new_hits} );
+  my $num_new_raw = scalar( @{$new_hits} );
+  my $num_new     = $num_new_raw;
 
-  print "  new hits found: $num_new\n";
+  print "  new hits found: $num_new_raw\n";
 
   ##############################################################################
   ## Step 2 — convergence check
@@ -261,6 +281,31 @@ for my $iter ( 1 .. $max_iter ) {
 
   ## read current model sequences
   my @model_fa = GraphClust::read_fasta_file("$model_dir/model.tree.fa");
+  my $num_model = scalar( @{ $model_fa[1] } );
+
+  ## Hard RAM guardrails for mlocarna: cap number of sequences per iteration.
+  if ( $cm_expand_max_new_per_iter > 0 && $num_new > $cm_expand_max_new_per_iter ) {
+    splice( @{$new_hits}, $cm_expand_max_new_per_iter );
+    $num_new = scalar( @{$new_hits} );
+    print "  Truncated new hits to max-new-hits-per-iter=$cm_expand_max_new_per_iter (kept $num_new/$num_new_raw).\n";
+  }
+
+  my $allowed_new = $cm_expand_max_total_seqs - $num_model;
+  if ( $allowed_new < 0 ) {
+    print "  WARNING: model already has $num_model seqs (> cap $cm_expand_max_total_seqs) — stopping expansion to avoid OOM.\n";
+    $iterations_done = $iter;
+    last;
+  }
+  if ( $num_new > $allowed_new ) {
+    splice( @{$new_hits}, $allowed_new );
+    $num_new = scalar( @{$new_hits} );
+    print "  Truncated new hits by total cap: model=$num_model cap=$cm_expand_max_total_seqs (kept $num_new/$num_new_raw).\n";
+  }
+  if ( $num_new == 0 ) {
+    print "  No capacity for additional sequences in this iteration (model=$num_model cap=$cm_expand_max_total_seqs) — stopping expansion.\n";
+    $iterations_done = $iter;
+    last;
+  }
 
   open( my $FA_OUT, ">$expand_fa_file" )
     or die "Cannot write $expand_fa_file: $!\n";
@@ -293,9 +338,18 @@ for my $iter ( 1 .. $max_iter ) {
   ##############################################################################
 
   my $mloc_dir = "$model_dir/expand.iter$iter";
-  my $dp_dir   = "$in_cluster_dir/dp";
 
-  GraphClust::mlocarna_center( $expand_fa_file, $mloc_dir, $dp_dir, 1 );
+  ## Remove any partial directory from a previous failed attempt
+  system("rm -rf $mloc_dir") if ( -d $mloc_dir );
+  system("mkdir -p $mloc_dir");
+
+  ## Run mlocarna directly without die-on-failure so a threading crash stops
+  ## only this expansion iteration, not the whole pipeline run.
+  my $OPTS_locarna_p_model = $CONFIG{OPTS_locarna_p_model};
+  ## This option is memory-intensive and unstable for large inputs.
+  $OPTS_locarna_p_model =~ s/\s--consistency-transformation\b/ /g;
+  system( "$locarna_path/mlocarna $OPTS_locarna_p_model --threads 1 --verbose --probabilistic"
+        . " --tgtdir $mloc_dir $expand_fa_file > $mloc_dir/locarnaP.out 2>&1" );
 
   my $result_aln = "$mloc_dir/results/result.aln";
 
@@ -318,10 +372,8 @@ for my $iter ( 1 .. $max_iter ) {
     my $cmf_stk = "$model_dir/expand.iter$iter.cmfinder.stk";
     my $cmf_cm  = "$model_dir/expand.iter$iter.cmfinder.cm";
 
-    system_call(
-      "${cmfinder_path}cmfinder --g 1.0 -a $model_dir/model.tree.stk $expand_fa_file $cmf_cm > $cmf_stk",
-      1
-    );
+    # Exit code 2 means "no acceptable motif found" — not a hard error; ignore it
+    system( "${cmfinder_path}cmfinder -a $model_dir/model.tree.stk -o $cmf_stk $expand_fa_file" );
 
     system("rm -f $cmf_cm");
 
@@ -361,22 +413,53 @@ for my $iter ( 1 .. $max_iter ) {
   ## Step 6 — build new model.stk and update model.tree.fa
   ##############################################################################
 
-  system_call(
-    "perl $binDir/mloc2stockholm.pl -file $final_aln -split_input yes -con_struct $final_aln.alifold",
-    $verbose
-  );
+  my $mloc2_cmd = "perl $binDir/mloc2stockholm.pl -file $final_aln -split_input yes -con_struct $final_aln.alifold";
+  my $mloc2_rc  = system($mloc2_cmd);
+  if ( $mloc2_rc != 0 ) {
+    warn "  WARNING: mloc2stockholm failed for iteration $iter (exit=$mloc2_rc) — stopping expansion.\n";
+    last;
+  }
 
-  ## mloc2stockholm produces $final_aln with .aln replaced by .sth
-  ( my $sth_file = $final_aln ) =~ s/\.aln$/.sth/;
+  ## mloc2stockholm appends .sth to the input filename
+  my $sth_file = "$final_aln.sth";
 
-  system("cp $sth_file $model_dir/model.stk");
+  unless ( -e $sth_file && !-z $sth_file ) {
+    warn "  WARNING: missing stockholm file $sth_file after mloc2stockholm — stopping expansion.\n";
+    last;
+  }
+
+  my $cp_model_rc = system("cp $sth_file $model_dir/model.stk");
+  if ( $cp_model_rc != 0 || !-e "$model_dir/model.stk" || -z "$model_dir/model.stk" ) {
+    warn "  WARNING: failed to update $model_dir/model.stk from $sth_file — stopping expansion.\n";
+    last;
+  }
 
   ## update model.tree.fa with the expanded sequence set for the next iteration
-  system("cp $expand_fa_file $model_dir/model.tree.fa");
+  my $cp_tree_rc = system("cp $expand_fa_file $model_dir/model.tree.fa");
+  if ( $cp_tree_rc != 0 ) {
+    warn "  WARNING: failed to update $model_dir/model.tree.fa from $expand_fa_file — stopping expansion.\n";
+    last;
+  }
 
   ##############################################################################
   ## Step 7 — cmbuild + cmsearch
   ##############################################################################
+
+  # Check if SS_cons has any base pairs — cmbuild crashes on structure-free alignments
+  my $has_structure = 0;
+  if ( open my $stk_fh, "<", "$model_dir/model.stk" ) {
+    while ( my $line = <$stk_fh> ) {
+      if ( $line =~ /^#=GC\s+SS_cons\s+(.*)/ ) {
+        $has_structure = 1 if ( $1 =~ /[<>(){}\[\]]/ );
+        last;
+      }
+    }
+    close $stk_fh;
+  }
+  unless ($has_structure) {
+    warn "  WARNING: SS_cons has no base pairs after iteration $iter — stopping expansion.\n";
+    last;
+  }
 
   my $iter_search_dir = "$cmsearch_dir/expand.iter$iter";
   make_path($iter_search_dir);
@@ -386,6 +469,10 @@ for my $iter ( 1 .. $max_iter ) {
   my $tab_file = "$iter_search_dir/model.stk.cm.tabresult";
 
   system_call( "$infernal_path/cmbuild -F $cm_file $model_dir/model.stk", $verbose );
+
+  if ($cm_calibrate) {
+    system_call( "$infernal_path/cmcalibrate $OPTS_cmcalibrate $cm_file", $verbose );
+  }
 
   my $cmd_cms = "$infernal_path/cmsearch -g $cmsearch_filter_opt $cmsearch_noalign_opt $cmsearch_cpu_opt";
   $cmd_cms .= " $cmsearch_table_opt $tmp_tab";
@@ -491,4 +578,3 @@ print $stats_fh "RSCAPE_PAIRS $rscape_pairs "
 close($stats_fh);
 
 print "gc_cm_expand.pl finished successfully.\n";
-

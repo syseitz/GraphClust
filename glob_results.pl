@@ -204,6 +204,7 @@ foreach my $key ( keys %cm_hitlists ) {
       EVALUE   => 0,
       STRAND   => $strand,
       NAME     => $key,
+      KEY      => "$seqid#$start#$stop#$strand",
     };
     $existing_seqids{$seqid} = 1;
   }
@@ -600,8 +601,14 @@ sub write_partition {
       my $idx   = $clus2idx->{ $hit->{NAME} };
       my $merge = $merge_map->{ $hit->{NAME} };
 
+      my $hit_key = $hit->{KEY};
+      if ( !defined $hit_key || $hit_key !~ /^SEQ\d+#\d+#\d+#[+-]$/ ) {
+        print STDERR "WARNING write_partition: skip invalid KEY '$hit_key' for cluster $hit->{NAME}\n";
+        next;
+      }
+
       ## seq-id-hit-key, score, parent-merge-cluster, child-merge-cluster, parent-merge-cluster-idx
-      print OUT join( " ", $hit->{KEY}, $hit->{BITSCORE}, $hit->{EVALUE}, $merge, $hit->{NAME}, $idx );
+      print OUT join( " ", $hit_key, $hit->{BITSCORE}, $hit->{EVALUE}, $merge, $hit->{NAME}, $idx );
       ## seq-true-class, seq-pred-class, class-idx
 
       if ($evaluate) {

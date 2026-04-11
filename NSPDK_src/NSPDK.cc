@@ -354,7 +354,7 @@ public:
 	unsigned DatasetSize() const {
 		return mStreamingMode
 			? static_cast<unsigned>(mStreamOffsets.size())
-			: static_cast<unsigned>(DatasetSize());
+			: static_cast<unsigned>(mDataset.size());
 	}
 
 	// Returns vector i by value.  In streaming mode, loads from the LRU cache
@@ -412,6 +412,32 @@ public:
 	}
 
 	// -------------------------------------------------------------------------
+
+	// Bulk-load all vectors from the streaming file into mDataset for fast
+	// lock-free parallel access.  After this call DatasetGet() returns
+	// mDataset[i] directly — no file I/O, no OMP critical section.
+	void LoadAllVectorsIntoMemory() {
+		if (!mStreamingMode) return;
+		unsigned n = static_cast<unsigned>(mStreamOffsets.size());
+		cout << "Loading " << n << " vectors into RAM for parallel access..." << endl;
+		mDataset.resize(n);
+
+		ifstream fin(mStreamFilename.c_str(), ios::binary);
+		if (!fin) throw range_error("Cannot reopen file: " + mStreamFilename);
+		for (unsigned i = 0; i < n; ++i) {
+			fin.seekg(static_cast<streamoff>(mStreamOffsets[i]));
+			mDataset[i].load(fin);
+		}
+		fin.close();
+
+		// Free streaming resources
+		mStreamCache.clear();
+		mStreamLRU.clear();
+		mStreamOffsets.clear();
+		mStreamOffsets.shrink_to_fit();
+		mStreamingMode = false;
+		cout << "All vectors loaded into RAM." << endl;
+	}
 
 	void Generate(const GraphClass& aG, SVector& oX) {
 		//create base graph features
@@ -831,50 +857,74 @@ public:
 	// modes we do the sequential pass now.
 	void PrecomputeSignatures() {
 		if (mStreamingMode) {
-			// Already populated by InputSparseStreaming().
 			cout << "Signatures already computed during streaming load — skipping." << endl;
 			return;
 		}
-		cout << "Pre-computing hash signatures (sequential)..." << endl;
-		mSignatureCache.assign(DatasetSize(), vector<unsigned>());
-		for (unsigned i = 0; i < DatasetSize(); ++i)
+		unsigned ds = DatasetSize();
+		cout << "Pre-computing hash signatures for " << ds << " instances..." << endl;
+		mSignatureCache.resize(ds);
+		#pragma omp parallel for schedule(dynamic, 64)
+		for (unsigned i = 0; i < ds; ++i)
 			mSignatureCache[i] = ComputeHashSignature(mDataset[i], i);
 	}
 
 	void ComputeBinDataStructure() {
-		string ofname = "hash_encoding";
-		ofstream of(ofname.c_str());
-		cout << "using num threads = "<< omp_get_max_threads()<< endl;
+		unsigned num_threads = omp_get_max_threads();
+		cout << "using num threads = " << num_threads << endl;
 		cout << "Computing bin data structure..." << endl;
-		ProgressBar progress_bar;
+
+		// Load all vectors into RAM so parallel access is lock-free.
+		LoadAllVectorsIntoMemory();
 
 		PrecomputeSignatures();
 		InitBinDataStructure();
-		//omp_set_num_threads(PARAM_OBJ.mThreads);
-		//fill structure — mSignatureMap is fully populated, so parallel reads are safe
-		#pragma omp parallel for schedule(dynamic,10)
-		for (unsigned i = 0; i < DatasetSize(); ++i) {
-			vector<unsigned> min_list = ComputeHashSignature(i);
-			if (PARAM_OBJ.mOutputHashEncoding) {
-				for (unsigned j = 0; j < min_list.size(); j++)
-					of << min_list[j] << " ";
-				of << endl;
-			}
-			#pragma omp critical
-			{
-				for (unsigned k = 0; k < PARAM_OBJ.mNumHashFunctions; ++k) {
-					if (mBinDataStructure[k].count(min_list[k]) > 0) {
-						mBinDataStructure[k][min_list[k]].push_back(i);
-					} else {
-						vector<unsigned> tmp;
-						tmp.push_back(i);
-						mBinDataStructure[k].insert(make_pair(min_list[k], tmp));
+
+		unsigned nhf = PARAM_OBJ.mNumHashFunctions;
+		unsigned ds = DatasetSize();
+
+		// Thread-local bin data structures — each thread accumulates independently,
+		// eliminating the critical section that serialised the old implementation.
+		vector<vector<umap_uint_vec_uint>> local_bins(num_threads,
+			vector<umap_uint_vec_uint>(nhf));
+
+		ofstream of;
+		if (PARAM_OBJ.mOutputHashEncoding) of.open("hash_encoding");
+
+		#pragma omp parallel
+		{
+			unsigned tid = omp_get_thread_num();
+			auto& my_bins = local_bins[tid];
+
+			#pragma omp for schedule(dynamic, 64)
+			for (unsigned i = 0; i < ds; ++i) {
+				vector<unsigned> min_list = ComputeHashSignature(i);
+				if (PARAM_OBJ.mOutputHashEncoding) {
+					#pragma omp critical (hash_encoding_io)
+					{
+						for (unsigned j = 0; j < min_list.size(); j++)
+							of << min_list[j] << " ";
+						of << endl;
 					}
 				}
-				progress_bar.Count();
+				for (unsigned k = 0; k < nhf; ++k) {
+					my_bins[k][min_list[k]].push_back(i);
+				}
 			}
-			//	mBinDataStructure[k].insert(make_pair(min_list[k], i));
 		}
+
+		// Merge thread-local bins into the shared structure.
+		cout << "Merging bins from " << num_threads << " threads..." << endl;
+		for (unsigned t = 0; t < num_threads; ++t) {
+			for (unsigned k = 0; k < nhf; ++k) {
+				for (auto& kv : local_bins[t][k]) {
+					auto& target = mBinDataStructure[k][kv.first];
+					target.insert(target.end(), kv.second.begin(), kv.second.end());
+				}
+			}
+		}
+		// Free thread-local memory.
+		local_bins.clear();
+		local_bins.shrink_to_fit();
 	}
 
 	void InitBinDataStructure() {
@@ -995,12 +1045,15 @@ public:
 		vector<unsigned> hash_signature = ComputeHashSignature(aID);
 		vector<unsigned> neighborhood = ComputeApproximateNeighborhood(hash_signature, aSize);
 		vector<unsigned> true_neighborhood = ComputeTrueSubNeighborhood(aID, neighborhood, aSize);
-		if (aID < mApproximateNeighborhoodCache.size())
+		if (aID < mApproximateNeighborhoodCache.size()) {
+			#pragma omp critical (neighborhood_cache)
 			mApproximateNeighborhoodCache[aID] = true_neighborhood;
+		}
 		return true_neighborhood;
 	}
 
 	vector<unsigned> ComputeApproximateNeighborhood(unsigned aID) {
+		// Check cache (read path — safe for pre-allocated vector with per-index writes)
 		if (aID < mApproximateNeighborhoodCache.size()
 				&& !mApproximateNeighborhoodCache[aID].empty())
 			return mApproximateNeighborhoodCache[aID];
@@ -1008,8 +1061,10 @@ public:
 		unsigned aSize = PARAM_OBJ.mEccessNeighbourSizeFactor * PARAM_OBJ.mNumNearestNeighbors;
 		vector<unsigned> neighborhood = ComputeApproximateNeighborhood(hash_signature, aSize);
 		vector<unsigned> true_neighborhood = ComputeTrueSubNeighborhood(aID, neighborhood);
-		if (aID < mApproximateNeighborhoodCache.size())
+		if (aID < mApproximateNeighborhoodCache.size()) {
+			#pragma omp critical (neighborhood_cache)
 			mApproximateNeighborhoodCache[aID] = true_neighborhood;
+		}
 		return true_neighborhood;
 	}
 
@@ -1018,18 +1073,17 @@ public:
 		vector<pair<unsigned, double> > vec;
 		for (unsigned k = 0; k < PARAM_OBJ.mNumHashFunctions; ++k) {
 			unsigned hash_id = aInstanceSignature[k];
-			unsigned collision_size = mBinDataStructure[k][hash_id].size();
+			// Use find() instead of operator[] to avoid inserting new keys
+			// into the shared mBinDataStructure from parallel threads.
+			auto bin_it = mBinDataStructure[k].find(hash_id);
+			if (bin_it == mBinDataStructure[k].end()) continue;
 
+			unsigned collision_size = bin_it->second.size();
 			if (collision_size < PARAM_OBJ.mMaxSizeBin * DatasetSize()) {
-				//fill neighborhood set counting number of occurrences
-				for (vector<unsigned>::iterator it = mBinDataStructure[k][hash_id].begin();
-						it != mBinDataStructure[k][hash_id].end(); ++it) {
-					unsigned instance_id = *it;
+				for (unsigned instance_id : bin_it->second) {
 					if (neighborhood.count(instance_id) > 0) neighborhood[instance_id]++;
 					else neighborhood[instance_id] = 1;
 				}
-			} else {
-				//mBinDataStructure[k].erase(hash_id);
 			}
 		}
 		// trims neighbh acc to mEccessNeighbourSizeFactor, if 0 no trim
@@ -1211,6 +1265,50 @@ public:
 		return density;
 	}
 
+	// Compute true density for ALL instances in one pass using the symmetric
+	// property k(i,j) = k(j,i).  Only the upper triangle is computed, halving
+	// work.  Thread-local accumulators avoid locking entirely and the kernel
+	// cache (mKernelMap) is bypassed, saving ~2 GB RAM.
+	void ComputeAllTrueDensities() {
+		unsigned n = DatasetSize();
+		cout << "Computing true density for all " << n
+			<< " instances (parallel, symmetric)..." << endl;
+
+		unsigned nt = omp_get_max_threads();
+		// Thread-local density sums — each thread writes only to its own array.
+		vector<vector<double>> local_density(nt, vector<double>(n, 0.0));
+
+		ProgressBar progress_bar;
+
+		#pragma omp parallel
+		{
+			unsigned tid = omp_get_thread_num();
+			auto& my_density = local_density[tid];
+
+			#pragma omp for schedule(dynamic, 16)
+			for (unsigned i = 0; i < n; ++i) {
+				// Direct access — no copy, no lock (requires LoadAllVectorsIntoMemory).
+				const SVector& vi = mDataset[i];
+				for (unsigned j = i + 1; j < n; ++j) {
+					double k_ij = dot(vi, mDataset[j]);
+					my_density[i] += k_ij;
+					my_density[j] += k_ij;
+				}
+				#pragma omp critical (progress_bar_true_density)
+				progress_bar.Count();
+			}
+		}
+
+		// Merge thread-local results into mTrueDensityMap and normalise.
+		mTrueDensityMap.assign(n, 0.0);
+		double denom = (n > 1) ? static_cast<double>(n - 1) : 1.0;
+		for (unsigned t = 0; t < nt; ++t)
+			for (unsigned i = 0; i < n; ++i)
+				mTrueDensityMap[i] += local_density[t][i];
+		for (unsigned i = 0; i < n; ++i)
+			mTrueDensityMap[i] /= denom;
+	}
+
 	double ComputeAverageDensity(set<unsigned>& aSet) {
 		double density = 0;
 		for (set<unsigned>::iterator it = aSet.begin(); it != aSet.end(); ++it) {
@@ -1258,20 +1356,19 @@ public:
 				selected_index_list.push_back(index_list[i]);
 		}
 
-		//compute density estimate
-		vector<pair<double, unsigned> > density_list;
+		//compute density estimate — pre-allocate output to avoid critical section
+		unsigned sel_size = selected_index_list.size();
+		vector<pair<double, unsigned> > density_list(sel_size);
 		{
 			ProgressBar progress_bar;
-			#pragma omp parallel for schedule(dynamic,10)
-			for (unsigned j = 0; j < selected_index_list.size(); ++j) {
+			#pragma omp parallel for schedule(dynamic, 4)
+			for (unsigned j = 0; j < sel_size; ++j) {
 				unsigned i = selected_index_list[j];
 				double density = ComputeApproximateDensity(i);
+				density_list[j] = make_pair(-density, i);
 
-				#pragma omp critical
-				{
-					density_list.push_back(make_pair(-density, i));
-					progress_bar.Count();
-				}
+				#pragma omp critical (progress_bar)
+				progress_bar.Count();
 			}
 		}
 
@@ -1436,33 +1533,27 @@ public:
 	}
 
 	void OutputClusterVerbose(ostream& out, vector<unsigned> aDensityCenterList) {
+		// Compute ALL true densities in one parallel, cache-free pass.
+		// This replaces the two sequential loops that used to call
+		// ComputeTrueDensity() one instance at a time, growing the kernel
+		// cache to O(N²) entries and ~2 GB RAM.
+		ComputeAllTrueDensities();
+
+		// Report center statistics.
 		vector<double> density_list;
-		{
-			ProgressBar progress_bar;
-			cout << "Computing true density for approximated center list of "
-					<< aDensityCenterList.size() << " centers" << endl;
-			for (unsigned i = 0; i < aDensityCenterList.size(); ++i) {
-				unsigned id = aDensityCenterList[i];
-				density_list.push_back(ComputeTrueDensity(id));
-				progress_bar.Count();
-			}
-		}
+		for (unsigned i = 0; i < aDensityCenterList.size(); ++i)
+			density_list.push_back(mTrueDensityMap[aDensityCenterList[i]]);
 		{
 			VectorClass density_stats(density_list);
 			cout << endl << "Centers density statistics: ";
 			density_stats.OutputStatistics(cout);
 			cout << endl;
 		}
+
+		// Report global statistics (already computed).
 		{
-			vector<double> true_density_list;
-			{
-				ProgressBar progress_bar;
-				cout << "Computing true density for all instances " << DatasetSize() << endl;
-				for (unsigned i = 0; i < DatasetSize(); i++) {
-					true_density_list.push_back(ComputeTrueDensity(i));
-					progress_bar.Count();
-				}
-			}
+			vector<double> true_density_list(mTrueDensityMap.begin(),
+				mTrueDensityMap.end());
 			VectorClass density_stats(true_density_list);
 			cout << endl << "Global density statistics: ";
 			density_stats.OutputStatistics(cout);
@@ -1548,26 +1639,47 @@ public:
 		}
 		unsigned effective_neighbourhood_size = min(PARAM_OBJ.mNumNearestNeighbors,
 				(unsigned) DatasetSize());
+		unsigned n = DatasetSize();
+		unsigned id_count = id_list.size();
 		cout << "Compute true " << effective_neighbourhood_size << "-nearest neighbours for "
-				<< id_list.size() << " elements." << endl; ////
+				<< id_count << " elements." << endl;
+
+		// Compute all KNN results in parallel, then write sequentially.
+		// Each entry: sorted neighbor IDs and their kernel values.
+		struct KNNResult {
+			vector<pair<double, unsigned>> neighbors; // (similarity, id)
+		};
+		vector<KNNResult> results(id_count);
+
 		ProgressBar progress_bar;
-		for (unsigned i = 0; i < id_list.size(); ++i) {
+		#pragma omp parallel for schedule(dynamic, 4)
+		for (unsigned i = 0; i < id_count; ++i) {
 			unsigned u = id_list[i];
-			vector<pair<double, unsigned> > sim_list;
-			//compute kernel pairs between aID and all elements
-			for (unsigned v = 0; v < DatasetSize(); v++) {
-				double k_uv = Kernel(u, v);
-				sim_list.push_back(make_pair(-k_uv, v)); //note: use -k to sort in decreasing order
+			auto& res = results[i];
+			res.neighbors.resize(n);
+			for (unsigned v = 0; v < n; v++) {
+				double k_uv = dot(mDataset[u], mDataset[v]);
+				res.neighbors[v] = make_pair(-k_uv, v);
 			}
-			//sort and take truly most similar
-			sort(sim_list.begin(), sim_list.end());
+			partial_sort(res.neighbors.begin(),
+				res.neighbors.begin() + effective_neighbourhood_size,
+				res.neighbors.end());
+			// Trim to only keep what we need.
+			res.neighbors.resize(effective_neighbourhood_size);
+
+			#pragma omp critical (progress_bar_true_knn)
+			progress_bar.Count();
+		}
+
+		// Sequential I/O (order must be preserved).
+		for (unsigned i = 0; i < id_count; ++i) {
+			auto& res = results[i];
 			for (unsigned k = 0; k < effective_neighbourhood_size; ++k) {
-				out << sim_list[k].second + 1 << " "; //NOTE: numbering starts from 1
-				out2 <<  sim_list[k].second + 1 << ":" << -sim_list[k].first << " "; //NOTE: numbering starts from 0
+				out << res.neighbors[k].second + 1 << " ";
+				out2 << res.neighbors[k].second + 1 << ":" << -res.neighbors[k].first << " ";
 			}
 			out << endl;
 			out2 << endl;
-			progress_bar.Count();
 		}
 	}
 
@@ -1686,16 +1798,25 @@ public:
 		unsigned i = min(aI, aJ);
 		unsigned j = max(aI, aJ);
 		if (PARAM_OBJ.mCaching) {
-			// Pack (i,j) into a single uint64 key: avoids pair<unsigned,unsigned>
-			// and the std::map tree-node overhead (~64 bytes/entry → ~20 bytes/entry).
 			unsigned long long key = (static_cast<unsigned long long>(i) << 32) | j;
-			auto it = mKernelMap.find(key);
-			if (it == mKernelMap.end()) {
-				double value = Similarity(i, j);
-				mKernelMap.emplace(key, value);
-				return value;
+			// Check cache without lock (read-only lookup is safe for unordered_map
+			// when no concurrent writes happen; we accept rare double-computation
+			// over heavy locking).
+			double value;
+			bool found = false;
+			#pragma omp critical (kernel_cache)
+			{
+				auto it = mKernelMap.find(key);
+				if (it != mKernelMap.end()) {
+					value = it->second;
+					found = true;
+				}
 			}
-			return it->second;
+			if (found) return value;
+			value = Similarity(i, j);
+			#pragma omp critical (kernel_cache)
+			mKernelMap.emplace(key, value);
+			return value;
 		} else return Similarity(i, j);
 	}
 

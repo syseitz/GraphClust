@@ -326,6 +326,7 @@ my $GSPANNO  = 0;          # used for gspan filenames
 # sequences with one or two nucleotides will be restricted to sequence-only graphs
 # this ensures that no sequences are skipped and external info kept synchronized
 my $GSPAN_SEQ_MINLEN = 3;
+my $SHAPES_ERRORS = 0;  # track RNAshapes failures for exit code
 
 # name spaces
 my $ABSTRUCT = "AS";
@@ -566,15 +567,35 @@ while ( my $seq = shift @used_seqs ) {
 
     my $rnashapesoutput_fh;
 
-    # call RNAshapes and write to $rnashapesoutput_fh
-    $rnashapesoutput_fh = call_RNAshapes( $seq_fasta, $rnashapes_loc, $win_size,
-      $curr_shift, $i_e, $i_c, $curr_t, $i_u, $i_r, $i_q, $i_T, $i_i, $i_sample_min_length, $seq_len, $i_matchShape );
-
-    # read RNAshapes output from $rnashapesoutput_fh and write subgraph
-    # to gspan file
+    # call RNAshapes with retry logic for transient Bus Errors
     my $gi_old = $gi;
-    $gi = convert_RNAshapes_output( $rnashapesoutput_fh, $gi, $i_M, $out, $graph_header,
-      $win_size, $seq_len, $curr_t, $i_annotate, $i_abstr, $i_crop_unpaired_ends, $i_stacks, $seq );
+    my $max_retries = 3;
+    my $shapes_ok = 0;
+    my $attempt = 0;
+
+    while ($attempt < $max_retries && !$shapes_ok) {
+      $attempt++;
+      $shapes_ok = eval {
+        $rnashapesoutput_fh = call_RNAshapes( $seq_fasta, $rnashapes_loc, $win_size,
+          $curr_shift, $i_e, $i_c, $curr_t, $i_u, $i_r, $i_q, $i_T, $i_i, $i_sample_min_length, $seq_len, $i_matchShape );
+
+        $gi = convert_RNAshapes_output( $rnashapesoutput_fh, $gi, $i_M, $out, $graph_header,
+          $win_size, $seq_len, $curr_t, $i_annotate, $i_abstr, $i_crop_unpaired_ends, $i_stacks, $seq );
+        1;
+      };
+
+      if ( !$shapes_ok ) {
+        if ($attempt < $max_retries) {
+          warn "WARNING: RNAshapes failed (attempt $attempt/$max_retries) for seq $seq_id (winsize=$win_size). Retrying...\n";
+          sleep 2;
+          $gi = $gi_old;
+        } else {
+          print STDERR "ERROR: RNAshapes failed after $max_retries attempts for seq $seq_id (winsize=$win_size). Skipping. Error: $@\n";
+          $gi = $gi_old;
+          $SHAPES_ERRORS++;
+        }
+      }
+    }
 
     ## no (match) shape found at all for this seq
     if ($gi == $gi_old+1){
@@ -599,6 +620,12 @@ if ($i_groupsize) {
   move "$gspanfile.no_match", "$i_o/$group_idx.group.gspan.no_match" if ($out_no_match_shape);
 } elsif ( $out_no_match_shape && !$i_stdout && !$i_groupsize ) {
   close($out_no_match_shape);
+}
+
+# exit with error if any sequences failed (visible in monitor) but all others were processed
+if ($SHAPES_ERRORS > 0) {
+  print STDERR "WARNING: $SHAPES_ERRORS sequence(s) skipped due to RNAshapes errors.\n";
+  exit(1);
 }
 
 ###############################################################################
@@ -928,7 +955,7 @@ sub convert_RNAshapes_output {
       $stacks, $orig_seq );
   }
 
-  close($rnashapesoutput);
+  close($rnashapesoutput) or die "RNAshapes process failed with exit status $?\n";
 
   return $curr_gi + 1;    # return the gi (graph index) for the next subgraph
 }
