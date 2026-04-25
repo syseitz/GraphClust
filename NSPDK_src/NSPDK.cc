@@ -303,7 +303,7 @@ protected:
 	string                mStreamFilename;
 	vector<long long>     mStreamOffsets;   // byte position of each accepted record
 
-	static const unsigned STREAM_CACHE_SIZE = 4096;  // tune for available RAM
+	static const unsigned STREAM_CACHE_SIZE = 65536;  // tune for available RAM
 	struct StreamCacheEntry {
 		SVector                  vec;
 		list<unsigned>::iterator lruIt;
