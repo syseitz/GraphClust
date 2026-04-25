@@ -441,8 +441,8 @@ if ( !-e "$SVECTOR_DIR/data.svector.DONE" ) {
 
   ## remove binary features of each group
   system_call("for i in \$(seq 1 $num_groups); do rm -f $SVECTOR_DIR/data.svector.\$i; done");
-  ## remove gspan files
-  system_call("\\rm -f $GSPAN_DIR/*.group.gspan.* ");
+  ## remove gspan files (use find -delete to avoid ARG_MAX with many files)
+  system_call("find $GSPAN_DIR -maxdepth 1 -name '*.group.gspan.*' -type f -delete");
 
   system("touch $SVECTOR_DIR/data.svector.DONE");
   system( "echo  \`date\` >> $time_file; echo " . time . " >> $time_file " );
@@ -1186,7 +1186,7 @@ sub job_call {
   if ( !-e "$JOB_sge_logdir/task.submitted" && !-e "$JOB_sge_logdir/JOB.ERROR" ) {
     SUBSECTION("submit $JOB_NAME - tasks = $JOB_num_tasks - use SGE = $JOB_sge_use");
     ## master start time
-    system("\\rm -f $JOB_sge_logdir/*");
+    system("find $JOB_sge_logdir -maxdepth 1 -mindepth 1 -delete");
     system("echo  \`date\` > $JOB_times_file.master");
     system( "echo " . time . " >> $JOB_times_file.master" );
     my $err = job_submit( $JOB_script, $JOB_opts, $JOB_num_tasks, $JOB_sge_errdir, $JOB_sge_use, $JOB_sge_logdir, $QSUB_opts, $THREADS_NUM, $JOB_UUID, $LOCAL_TASK_SLOTS );
@@ -1216,7 +1216,7 @@ sub job_call {
       system( "echo " . time . " >> $JOB_times_file.master" );
       ## job times
       procSGEtimes( $JOB_sge_logdir, "$JOB_times_file.job" );
-      system("rm $JOB_sge_logdir/*; rm -r $JOB_sge_logdir");
+      system("find $JOB_sge_logdir -maxdepth 1 -mindepth 1 -delete; rmdir $JOB_sge_logdir");
     }
   }
 
@@ -1311,9 +1311,9 @@ sub job_check {
   if ( !exists $jobs_active{$job_UUID} ) {
     print "\n$section_prefix: Job is not active anymore! Try to resubmit...\n";
     system("rm -f $sge_log_dir/task.submitted");
-    system("rm -f $sge_log_dir/*.error");
-    system("rm -f $sge_log_dir/*.started");
-    system("rm -f $SGE_ERR_DIR/$job_UUID.*");
+    system("find $sge_log_dir -maxdepth 1 -name '*.error' -type f -delete");
+    system("find $sge_log_dir -maxdepth 1 -name '*.started' -type f -delete");
+    system("find $SGE_ERR_DIR -maxdepth 1 -name '$job_UUID.*' -type f -delete");
     ## set status to resubmit job
     return [ 0, 0, 0, $sge_jobs, 1 ];
   }
@@ -1364,8 +1364,8 @@ sub job_check {
     system("cat $SGE_ERR_DIR/$job_UUID.out.* >> $SGE_ERR_DIR/$job_UUID.out 2> /dev/null");
     system("cat $SGE_ERR_DIR/$job_UUID.err.* >> $SGE_ERR_DIR/$job_UUID.err 2> /dev/null");
 
-    system("rm -f $SGE_ERR_DIR/$job_UUID.out.* ");
-    system("rm -f $SGE_ERR_DIR/$job_UUID.err.* ");
+    system("find $SGE_ERR_DIR -maxdepth 1 -name '$job_UUID.out.*' -type f -delete");
+    system("find $SGE_ERR_DIR -maxdepth 1 -name '$job_UUID.err.*' -type f -delete");
 
     open( ERR, "$SGE_ERR_DIR/$job_UUID.err" );
     my @err = <ERR>;
@@ -1374,8 +1374,8 @@ sub job_check {
     system("rm -f $sge_log_dir/JOB.ERROR");
     if (@jobs_err) {
       print "ERROR! SGE job finished with exit code != 0!\n";
-      system("cat $sge_log_dir/*.error >> $sge_log_dir/JOB.ERROR");
-      system("rm -f $sge_log_dir/*.finished");
+      system("find $sge_log_dir -maxdepth 1 -name '*.error' -type f -exec cat {} + >> $sge_log_dir/JOB.ERROR");
+      system("find $sge_log_dir -maxdepth 1 -name '*.finished' -type f -delete");
       $sge_error = 1;
     }
 
@@ -1385,7 +1385,7 @@ sub job_check {
       SECTION("ERROR OUTPUT END $section_prefix");
       print "ERROR! SGE job has generated error output\n";
       system("cat $SGE_ERR_DIR/$job_UUID.err >> $sge_log_dir/JOB.ERROR");
-      system("rm -f $sge_log_dir/*.finished");
+      system("find $sge_log_dir -maxdepth 1 -name '*.finished' -type f -delete");
       $sge_error = 1;
     }
 
@@ -1394,8 +1394,8 @@ sub job_check {
     }
 
     system("rm -f $sge_log_dir/task.submitted");
-    system("cat $sge_log_dir/*.finished > $sge_log_dir/times 2> /dev/null");
-    system("rm -f $sge_log_dir/*.finished");
+    system("find $sge_log_dir -maxdepth 1 -name '*.finished' -type f -exec cat {} + > $sge_log_dir/times 2> /dev/null");
+    system("find $sge_log_dir -maxdepth 1 -name '*.finished' -type f -delete");
   }
 
   my $sge_finished = 0;
@@ -1457,62 +1457,62 @@ sub cleanStage {
   my $stage = $_[0];
 
   if ( $stage <= 8 ) {
-    system("rm -f -R $SGE_ERR_DIR/cmsearcher.*");
-    system("rm -f -R $EVAL_DIR/times/time.stage.8.*");
-    system("rm -f -R $EVAL_DIR/stage8.*");
+    system("find $SGE_ERR_DIR -maxdepth 1 -name 'cmsearcher.*' -delete 2>/dev/null");
+    system("find $EVAL_DIR/times -maxdepth 1 -name 'time.stage.8.*' -delete 2>/dev/null");
+    system("find $EVAL_DIR -maxdepth 1 -name 'stage8.*' -delete 2>/dev/null");
   }
 
   if ( $stage <= 7 ) {
-    system("rm -f -R $SGE_ERR_DIR/alignCenter.*");
-    system("rm -f -R $EVAL_DIR/cluster/bestClusters.scores.*");
-    system("rm -f -R $EVAL_DIR/cluster/bestClusters.qual.*");
-    system("rm -f -R $EVAL_DIR/times/time.stage.7.*");
-    system("rm -f -R $EVAL_DIR/stage7.*");
+    system("find $SGE_ERR_DIR -maxdepth 1 -name 'alignCenter.*' -delete 2>/dev/null");
+    system("find $EVAL_DIR/cluster -maxdepth 1 -name 'bestClusters.scores.*' -delete 2>/dev/null");
+    system("find $EVAL_DIR/cluster -maxdepth 1 -name 'bestClusters.qual.*' -delete 2>/dev/null");
+    system("find $EVAL_DIR/times -maxdepth 1 -name 'time.stage.7.*' -delete 2>/dev/null");
+    system("find $EVAL_DIR -maxdepth 1 -name 'stage7.*' -delete 2>/dev/null");
   }
 
   if ( $stage <= 6 ) {
     print "Cleanup stage 6 Cluster dir $CLUSTER_DIR...\n";
-    system("rm -f -R $CLUSTER_DIR/*");
-    system("rm -f -R $SGE_ERR_DIR/rnaclustAlignRange.*");
-    system("rm -f -R $SGE_ERR_DIR/alignCenter.*");
-    system("rm -f -R $EVAL_DIR/times/time.stage.6.*");
+    system("find $CLUSTER_DIR -maxdepth 1 -mindepth 1 -exec rm -rf {} + 2>/dev/null");
+    system("find $SGE_ERR_DIR -maxdepth 1 -name 'rnaclustAlignRange.*' -delete 2>/dev/null");
+    system("find $SGE_ERR_DIR -maxdepth 1 -name 'alignCenter.*' -delete 2>/dev/null");
+    system("find $EVAL_DIR/times -maxdepth 1 -name 'time.stage.6.*' -delete 2>/dev/null");
 
   }
 
   if ( $stage <= 5 ) {
     print "Cleanup stage 5 centers (data.svector.fast_cluster) in $SVECTOR_DIR...\n";
     system("rm -f $SVECTOR_DIR/centers.DONE");
-    system("rm -f $SVECTOR_DIR/data.svector.*.fast_cluster*");
-    system("rm -f $SVECTOR_DIR/data.svector.fast_cluster.*.DONE");
-    system("rm -f $EVAL_DIR/svector/*");
+    system("find $SVECTOR_DIR -maxdepth 1 -name 'data.svector.*.fast_cluster*' -type f -delete");
+    system("find $SVECTOR_DIR -maxdepth 1 -name 'data.svector.fast_cluster.*.DONE' -type f -delete");
+    system("find $EVAL_DIR/svector -maxdepth 1 -mindepth 1 -delete 2>/dev/null");
   }
 
   if ( $stage <= 4 ) {
     print "Cleanup stage 4 sparse vector (data.svector) in $SVECTOR_DIR...\n";
-    system("rm -f $SVECTOR_DIR/*.data.svector.DONE");
-    system("rm -f $SVECTOR_DIR/*.data.svector.*");
-    system("rm -f $SVECTOR_DIR/*.data.svector");
-    system("rm -f $SVECTOR_DIR/*.blacklist");
-    system("rm -f $in_ROOTDIR/*.DONE");
+    system("find $SVECTOR_DIR -maxdepth 1 -name '*.data.svector.DONE' -type f -delete");
+    system("find $SVECTOR_DIR -maxdepth 1 -name '*.data.svector.*' -type f -delete");
+    system("find $SVECTOR_DIR -maxdepth 1 -name '*.data.svector' -type f -delete");
+    system("find $SVECTOR_DIR -maxdepth 1 -name '*.blacklist' -type f -delete");
+    system("find $in_ROOTDIR -maxdepth 1 -name '*.DONE' -type f -delete");
   }
 
   if ( $stage <= 3 ) {
     print "Cleanup stage 3 sparse vector groups in $SVECTOR_DIR...\n";
-    system("rm -f -R $SVECTOR_DIR/svector.*");
+    system("find $SVECTOR_DIR -maxdepth 1 -name 'svector.*' -exec rm -rf {} + 2>/dev/null");
     system("rm -f -R $SVECTOR_DIR/SGE_log");
-    system("rm -f -R $SGE_ERR_DIR/gspanGroups.NSPDK.sge.*");
+    system("find $SGE_ERR_DIR -maxdepth 1 -name 'gspanGroups.NSPDK.sge.*' -delete 2>/dev/null");
   }
 
   if ( $stage <= 2 ) {
     print "Cleanup stage 2 gspan groups in $GSPAN_DIR...\n";
     system("rm -f -R $GSPAN_DIR/groups.DONE");
-    system("rm -f $GSPAN_DIR/*.group.gspan*");
+    system("find $GSPAN_DIR -maxdepth 1 -name '*.group.gspan*' -type f -delete");
   }
 
   if ( $stage <= 1 ) {
     print "Cleanup stage 1 gspan graphs in $GSPAN_DIR...\n";
-    system("rm -f -R $GSPAN_DIR/*");
-    system("rm -f -R $SGE_ERR_DIR/*");
+    system("find $GSPAN_DIR -maxdepth 1 -mindepth 1 -exec rm -rf {} + 2>/dev/null");
+    system("find $SGE_ERR_DIR -maxdepth 1 -mindepth 1 -exec rm -rf {} + 2>/dev/null");
   }
 
 }
@@ -1610,7 +1610,7 @@ sub job_submit {
   system("\\mkdir -p $SGE_ERRDIR");
   system("\\mkdir -p $SGE_LOGDIR");
 
-  system("rm -f $SGE_ERRDIR/$JOB_UUID.*");
+  system("find $SGE_ERRDIR -maxdepth 1 -name '$JOB_UUID.*' -type f -delete 2>/dev/null");
 
   my $err = 0;
 
