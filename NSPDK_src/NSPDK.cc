@@ -873,8 +873,20 @@ public:
 		cout << "using num threads = " << num_threads << endl;
 		cout << "Computing bin data structure..." << endl;
 
-		// Load all vectors into RAM so parallel access is lock-free.
-		LoadAllVectorsIntoMemory();
+		// In streaming mode the per-instance MinHash signatures were already
+		// pre-computed during InputSparseStreaming() and stored in
+		// mSignatureCache. The bin-build loop below only reads from
+		// mSignatureCache, so we can keep the raw vectors on disk and skip
+		// the multi-hundred-GB LoadAllVectorsIntoMemory() call. Down-stream
+		// kernel evaluations use DatasetGet() which is streaming-safe.
+		if (mStreamingMode) {
+			cout << "Streaming mode: vectors stay on disk; bin build uses "
+				"the pre-computed signature cache only." << endl;
+		} else {
+			// Non-streaming mode: load vectors into RAM so parallel access
+			// is lock-free (legacy behaviour for in-memory inputs).
+			LoadAllVectorsIntoMemory();
+		}
 
 		PrecomputeSignatures();
 		InitBinDataStructure();
@@ -1274,6 +1286,16 @@ public:
 		cout << "Computing true density for all " << n
 			<< " instances (parallel, symmetric)..." << endl;
 
+		// True-density computation does direct mDataset[i]/mDataset[j]
+		// access in an N x N inner loop; this is incompatible with on-disk
+		// streaming. If the bin build skipped the RAM load, do it lazily
+		// here (only triggered with -v).
+		if (mStreamingMode) {
+			cout << "(verbose path) loading all vectors into RAM for true-density"
+				" computation..." << endl;
+			LoadAllVectorsIntoMemory();
+		}
+
 		unsigned nt = omp_get_max_threads();
 		// Thread-local density sums — each thread writes only to its own array.
 		vector<vector<double>> local_density(nt, vector<double>(n, 0.0));
@@ -1629,6 +1651,13 @@ public:
 	}
 
 	void OutputTrueKNN(ostream& out, ostream& out2) {
+		// True KNN does direct mDataset[u]/mDataset[v] access in an inner
+		// loop and is incompatible with on-disk streaming. Lazy-load the
+		// vectors here if the bin build skipped the RAM load.
+		if (mStreamingMode) {
+			cout << "(true-knn path) loading all vectors into RAM..." << endl;
+			LoadAllVectorsIntoMemory();
+		}
 		vector<int> id_list;
 		if (mGreyList.size() > 0) {
 			for (unsigned i = 0; i < mGreyList.size(); ++i)
